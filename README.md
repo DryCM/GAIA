@@ -32,6 +32,7 @@ $env:EXPO_PUBLIC_API_BASE_URL="http://TU_IP_LOCAL:4000"
 ```
 
 Para movil fisico, usa la IP local de tu PC (por ejemplo `http://192.168.1.25:4000`).
+Para emulador Android de Android Studio, usa `http://10.0.2.2:4000`.
 
 ## Ejecutar
 
@@ -51,10 +52,14 @@ Luego escanea el QR con Expo Go.
 ## Endpoints backend
 
 - `GET /health`
-- `GET /api/credits?userId=...`
-- `POST /api/transcribe` (multipart audio)
-- `POST /api/chat` (texto)
-- `POST /api/images` (generacion de imagen)
+- `GET /api/version`
+- `GET /api/v1/version`
+- `GET /api/credits?userId=...` y `GET /api/v1/credits?userId=...`
+- `POST /api/transcribe` y `POST /api/v1/transcribe` (multipart audio)
+- `POST /api/chat` y `POST /api/v1/chat` (texto)
+- `POST /api/images` y `POST /api/v1/images` (generacion de imagen)
+
+La app intenta usar `/api/v1` y, si no existe, hace fallback automatico a `/api`.
 
 ## Monetizacion preparada
 

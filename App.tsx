@@ -41,6 +41,10 @@ export default function App() {
   ]);
 
   const canTalk = useMemo(() => Boolean(API_BASE_URL), []);
+  const isLikelyLocalhost = useMemo(
+    () => API_BASE_URL.includes("localhost") || API_BASE_URL.includes("127.0.0.1"),
+    []
+  );
 
   useEffect(() => {
     void initUser();
@@ -67,8 +71,9 @@ export default function App() {
 
   async function refreshCredits(currentUserId: string) {
     try {
-      const response = await fetch(
-        `${API_BASE_URL}/api/credits?userId=${encodeURIComponent(currentUserId)}`
+      const response = await apiFetch(
+        `/credits?userId=${encodeURIComponent(currentUserId)}`,
+        undefined
       );
       if (!response.ok) return;
 
@@ -82,8 +87,8 @@ export default function App() {
   async function startRecording() {
     if (!canTalk) {
       Alert.alert(
-        "Falta API Key",
-        "Configura EXPO_PUBLIC_OPENAI_API_KEY para activar la asistente."
+        "Falta URL del backend",
+        "Configura EXPO_PUBLIC_API_BASE_URL para activar la asistente."
       );
       return;
     }
@@ -151,6 +156,15 @@ export default function App() {
     ]);
   }
 
+  async function apiFetch(path: string, options?: RequestInit): Promise<Response> {
+    const v1 = await fetch(`${API_BASE_URL}/api/v1${path}`, options);
+    if (v1.status !== 404) {
+      return v1;
+    }
+
+    return fetch(`${API_BASE_URL}/api${path}`, options);
+  }
+
   async function transcribeAudio(audioUri: string): Promise<string> {
     const form = new FormData();
     form.append("userId", userId);
@@ -160,7 +174,7 @@ export default function App() {
       type: "audio/m4a",
     } as unknown as Blob);
 
-    const response = await fetch(`${API_BASE_URL}/api/transcribe`, {
+    const response = await apiFetch("/transcribe", {
       method: "POST",
       body: form,
     });
@@ -175,7 +189,7 @@ export default function App() {
   }
 
   async function askAssistant(userText: string): Promise<string> {
-    const response = await fetch(`${API_BASE_URL}/api/chat`, {
+    const response = await apiFetch("/chat", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -203,7 +217,7 @@ export default function App() {
   async function generateImage() {
     try {
       setIsGeneratingImage(true);
-      const response = await fetch(`${API_BASE_URL}/api/images`, {
+      const response = await apiFetch("/images", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -297,6 +311,12 @@ export default function App() {
         {!canTalk && (
           <Text style={styles.warning}>
             Configura EXPO_PUBLIC_API_BASE_URL para conectar con el backend.
+          </Text>
+        )}
+
+        {isLikelyLocalhost && (
+          <Text style={styles.warning}>
+            En Android fisico, localhost no apunta a tu PC. Usa la IP local de tu equipo.
           </Text>
         )}
 
