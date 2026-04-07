@@ -34,6 +34,11 @@ $env:EXPO_PUBLIC_API_BASE_URL="http://TU_IP_LOCAL:4000"
 Para movil fisico, usa la IP local de tu PC (por ejemplo `http://192.168.1.25:4000`).
 Para emulador Android de Android Studio, usa `http://10.0.2.2:4000`.
 
+Opcional para persistencia de creditos:
+
+- `CREDITS_STORE_FILE` en `backend/.env` para definir ruta del archivo JSON.
+- Si se deja vacio, usa `backend/data/credits-store.json` por defecto.
+
 ## Ejecutar
 
 ```bash
@@ -64,3 +69,7 @@ La app intenta usar `/api/v1` y, si no existe, hace fallback automatico a `/api`
 ## Monetizacion preparada
 
 La app incluye un bloque visual de anuncio en UI para reemplazar por AdMob Banner al pasar a build de tienda.
+
+## Notas backend
+
+- Los creditos se persisten en disco (JSON), por lo que no se pierden al reiniciar el servidor.
