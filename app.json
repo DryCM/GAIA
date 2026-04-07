@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "GaIA Voice",
+    "slug": "gaia-voice-assistant",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "backgroundColor": "#f4f1e8"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "GaIA usa tu micrófono para escucharte y responderte con IA."
+      }
+    },
+    "android": {
+      "permissions": [
+        "RECORD_AUDIO"
+      ]
+    }
+  }
+}
