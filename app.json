@@ -18,6 +18,9 @@
       "permissions": [
         "RECORD_AUDIO"
       ]
-    }
+    },
+    "plugins": [
+      "expo-asset"
+    ]
   }
 }
