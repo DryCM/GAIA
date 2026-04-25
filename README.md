@@ -1,7 +1,7 @@
 # GaIA Voice Assistant
 
 Arquitectura lista para escalar a Google Play:
-1. App movil Expo (voz, chat, preview de imagen y slot de anuncios).
+1. App movil Expo (voz, chat, dictado, texto a voz, texto a imagen, preview de imagen y slot de anuncios).
 2. Backend Node/Express para controlar creditos y enrutar proveedores IA.
 3. Modo local gratis por defecto con Ollama (sin API key).
 
@@ -63,6 +63,47 @@ npm run start:all
 
 Luego escanea el QR con Expo Go.
 
+## Funciones moviles actuales
+
+- Mascota infantil tipo animalito (estilo companero virtual) con selector para cambiarla cuando quieras.
+- Chat por texto.
+- Selector infantil `Modo maestra` o `Modo amiga` para adaptar como responde la IA.
+- Conversacion por voz manteniendo pulsado el boton principal.
+- Dictado de voz a texto con un boton dedicado, sin enviar automaticamente al chat.
+- Texto a voz para leer el texto escrito o la ultima respuesta del asistente.
+- Texto a imagen usando el contenido actual del campo de texto como prompt.
+
+## Mascotas 3D GLB (web)
+
+La app ya soporta pipeline de modelos 3D reales por mascota en web (GLB + clips de animacion) con fallback automatico al rig procedural si falta algun asset.
+
+Variables de entorno para activar GLB:
+
+PowerShell:
+
+```powershell
+$env:EXPO_PUBLIC_USE_GLB_MASCOTS="1"
+$env:EXPO_PUBLIC_MASCOT_GLB_BASE_URL="http://localhost:4000/assets/mascots"
+```
+
+Nombres de archivo esperados y convencion de clips:
+
+- Revisa [assets/mascots/README.md](assets/mascots/README.md)
+
+Estados conectados al motor de animacion:
+
+- `idle`
+- `listening`
+- `thinking`
+- `speaking`
+- `happy`
+
+Incluye:
+
+- Cache y precarga de GLB para cambios de mascota rapidos.
+- Lip sync basico sincronizado con TTS en modo `speaking`.
+- Soporte de mandibula por hueso y/o visemas por morph targets (ver convenciones en [assets/mascots/README.md](assets/mascots/README.md)).
+
 Para chat local gratis, asegúrate de tener Ollama levantado:
 
 ```bash
@@ -87,9 +128,54 @@ ollama pull llama3.2
 
 La app intenta usar `/api/v1` y, si no existe, hace fallback automatico a `/api`.
 
-## Monetizacion preparada
+## Instalador movil (APK/AAB)
 
-La app incluye un bloque visual de anuncio en UI para reemplazar por AdMob Banner al pasar a build de tienda.
+Para generar instalador real de movil (Android):
+
+1. Inicia sesion en Expo:
+
+```bash
+npx eas login
+```
+
+2. Configura el proyecto EAS (solo la primera vez):
+
+```bash
+npx eas build:configure
+```
+
+3. Genera APK instalable interna (para pruebas en movil):
+
+```bash
+npm run build:android:apk
+```
+
+4. Genera AAB de produccion (Google Play):
+
+```bash
+npm run build:android:aab
+```
+
+Al terminar, EAS devuelve un enlace para descargar el instalador.
+
+## Publicidad AdMob (activa en instalador)
+
+La app ya integra banner real de AdMob en Android/iOS con consentimiento parental desde la UI.
+
+Variables recomendadas para produccion:
+
+PowerShell:
+
+```powershell
+$env:EXPO_PUBLIC_ADMOB_ANDROID_BANNER_ID="ca-app-pub-xxxxxxxxxxxxxxxx/yyyyyyyyyy"
+$env:EXPO_PUBLIC_ADMOB_IOS_BANNER_ID="ca-app-pub-xxxxxxxxxxxxxxxx/yyyyyyyyyy"
+```
+
+Notas:
+
+- Si no defines IDs reales, se usa ID de prueba de Google automaticamente.
+- En Expo Go puede no cargarse el modulo nativo de anuncios; en instalador EAS si funciona.
+- El usuario puede activar o desactivar anuncios personalizados con el switch de consentimiento parental en cabecera.
 
 ## Notas backend
 

@@ -6,4 +6,5 @@ dist/
 *.log
 .env
 backend/data/*.json
+backend/data/chat-history/
 !backend/data/.gitkeep

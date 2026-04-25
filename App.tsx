@@ -1,4 +1,6 @@
 import { StatusBar } from "expo-status-bar";
+import { MascotRoom } from "./components/MascotRoom";
+import { AdBanner } from "./components/AdBanner";
 import { Audio } from "expo-av";
 import * as Speech from "expo-speech";
 import AsyncStorage from "@react-native-async-storage/async-storage";
@@ -13,9 +15,11 @@ import {
   Pressable,
   SafeAreaView,
   ScrollView,
+  Switch,
   StyleSheet,
   Text,
   TextInput,
+  useWindowDimensions,
   View,
 } from "react-native";
 
@@ -23,40 +27,348 @@ type ChatMessage = {
   id: string;
   role: "user" | "assistant";
   text: string;
+  webSearchUsed?: boolean;
 };
 
-const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL || "http://localhost:4000";
+type RecordingIntent = "chat" | "dictation";
+type ChildMode = "teacher" | "friend" | "storyteller" | "scientist" | "adventurer" | "comedian" | "poet";
+type MascotMood = "idle" | "thinking" | "happy" | "listening" | "speaking";
+
+// ES: Definición completa de los modos de habla disponibles
+// EN: Full definition of available speech modes
+const SPEECH_MODES: { id: ChildMode; label: string; emoji: string }[] = [
+  { id: "teacher",     label: "Maestra",    emoji: "📚" },
+  { id: "friend",      label: "Amiga",      emoji: "🎮" },
+  { id: "storyteller", label: "Cuentos",    emoji: "📖" },
+  { id: "scientist",   label: "Ciencia",    emoji: "🔬" },
+  { id: "adventurer",  label: "Aventura",   emoji: "🗺️" },
+  { id: "comedian",    label: "Payaso",     emoji: "🤡" },
+  { id: "poet",        label: "Poeta",      emoji: "✏️" },
+];
+
+type AppLanguage = "es" | "en" | "fr" | "it";
+const LANGUAGES: { id: AppLanguage; label: string; flag: string; speechCode: string }[] = [
+  { id: "es", label: "Español",  flag: "🇪🇸", speechCode: "es-ES" },
+  { id: "en", label: "English",  flag: "🇬🇧", speechCode: "en-US" },
+  { id: "fr", label: "Français", flag: "🇫🇷", speechCode: "fr-FR" },
+  { id: "it", label: "Italiano", flag: "🇮🇹", speechCode: "it-IT" },
+];
+
+type Mascot = {
+  id: string;
+  name: string;
+  emoji: string;
+  bg: string;
+  personality: string;
+  reactions: Record<MascotMood, string>;
+};
+
+function isLoopbackApiUrl(url: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(url.trim());
+}
+
+function getDetectedWebApiBaseUrl(): string | null {
+  if (Platform.OS !== "web" || typeof globalThis.location === "undefined") {
+    return null;
+  }
+
+  const { hostname, protocol } = globalThis.location;
+  if (!hostname) {
+    return null;
+  }
+
+  const normalizedProtocol = protocol === "https:" ? "https:" : "http:";
+  return `${normalizedProtocol}//${hostname}:4000`;
+}
+
+function getInitialApiBaseUrl(): string {
+  const envUrl = process.env.EXPO_PUBLIC_API_BASE_URL?.trim();
+  if (envUrl) {
+    return envUrl;
+  }
+
+  return getDetectedWebApiBaseUrl() || "http://localhost:4000";
+}
+
+const API_BASE_URL = getInitialApiBaseUrl();
 const USER_ID_KEY = "gaia-user-id";
 const API_BASE_URL_KEY = "gaia-api-base-url";
+const MASCOT_KEY = "gaia-mascot-id";
+const ADS_CONSENT_KEY = "gaia-ads-consent";
+const CHILD_AGE_KEY = "gaia-child-age";
+const LANGUAGE_KEY = "gaia-language";
+const DEFAULT_CHILD_AGE = 9;
+const DEFAULT_MASCOT: Mascot = {
+  id: "panda",
+  name: "Pandi",
+  emoji: "🐼",
+  bg: "#ffe8f1",
+  personality: "Tierna y protectora",
+  reactions: {
+    idle: "Estoy contigo para aprender jugando.",
+    listening: "Te escucho con mucha atencion.",
+    thinking: "Estoy pensando una gran respuesta...",
+    speaking: "Estoy contandotelo con energia.",
+    happy: "Listo, te traje una idea brillante.",
+  },
+};
+const MASCOTS: Mascot[] = [
+  DEFAULT_MASCOT,
+  {
+    id: "fox",
+    name: "Foxy",
+    emoji: "🦊",
+    bg: "#ffe9da",
+    personality: "Curiosa y aventurera",
+    reactions: {
+      idle: "Tengo ideas nuevas para explorar contigo.",
+      listening: "Estoy captando cada palabra.",
+      thinking: "Estoy hilando pistas como detective.",
+      speaking: "Te lo cuento con chispa y movimiento.",
+      happy: "Aja, ya lo tengo. Vamos con todo.",
+    },
+  },
+  {
+    id: "bunny",
+    name: "Nubi",
+    emoji: "🐰",
+    bg: "#f2eaff",
+    personality: "Dulce y creativa",
+    reactions: {
+      idle: "Vamos a imaginar algo bonito.",
+      listening: "Te escucho suavecito y con calma.",
+      thinking: "Estoy armando una respuesta con magia.",
+      speaking: "Te lo explico con dulzura y ritmo.",
+      happy: "Terminado. Te va a encantar.",
+    },
+  },
+  {
+    id: "otter",
+    name: "Otis",
+    emoji: "🦦",
+    bg: "#e3f6ff",
+    personality: "Jugueton y optimista",
+    reactions: {
+      idle: "Hoy toca aprender y divertirnos.",
+      listening: "Oidos listos. Te sigo.",
+      thinking: "Estoy buceando por la mejor respuesta.",
+      speaking: "Voy soltando ideas mientras juego contigo.",
+      happy: "Listo, mision completada.",
+    },
+  },
+  {
+    id: "koala",
+    name: "Koko",
+    emoji: "🐨",
+    bg: "#e9f4ff",
+    personality: "Paciente y calmada",
+    reactions: {
+      idle: "Respiramos y avanzamos paso a paso.",
+      listening: "Te escucho con calma total.",
+      thinking: "Estoy ordenando todo despacito y bien.",
+      speaking: "Te lo explico con calma y claridad.",
+      happy: "Perfecto. Ya tengo una respuesta clara.",
+    },
+  },
+  {
+    id: "owl",
+    name: "Lumi",
+    emoji: "🦉",
+    bg: "#efe9ff",
+    personality: "Sabia y estratega",
+    reactions: {
+      idle: "Estoy lista para descubrir contigo.",
+      listening: "Atenta y enfocada. Continua.",
+      thinking: "Analizando todo con mirada de buho.",
+      speaking: "Estoy compartiendo la respuesta con precision.",
+      happy: "Respuesta afinada y lista para ti.",
+    },
+  },
+  {
+    id: "cat",
+    name: "Mishi",
+    emoji: "🐱",
+    bg: "#fff1db",
+    personality: "Picarona y agil",
+    reactions: {
+      idle: "Tengo energia para resolver retos.",
+      listening: "Miau-listening activado.",
+      thinking: "Estoy afinando una respuesta rapida.",
+      speaking: "Voy soltando la respuesta con estilo.",
+      happy: "Hecho. Te quedo genial.",
+    },
+  },
+  {
+    id: "dolphin",
+    name: "Dori",
+    emoji: "🐬",
+    bg: "#ddf4ff",
+    personality: "Inteligente y alegre",
+    reactions: {
+      idle: "Saltamos juntos a nuevas ideas.",
+      listening: "Recibi tu mensaje con claridad.",
+      thinking: "Nadando entre ideas para darte lo mejor.",
+      speaking: "Te lo digo fluyendo, paso a paso.",
+      happy: "Ya esta. Respuesta fresca y brillante.",
+    },
+  },
+];
 
 export default function App() {
+  const isWeb = Platform.OS === "web";
+  const { height } = useWindowDimensions();
+  const isCompactLayout = height < 780;
   const floatAnim = useRef(new Animated.Value(0)).current;
   const pulseAnim = useRef(new Animated.Value(0)).current;
+  const mascotBounceAnim = useRef(new Animated.Value(1)).current;
+  const mascotHappyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const speechPulseTimer = useRef<ReturnType<typeof setInterval> | null>(null);
+  const speechPhaseRef = useRef(0);
+  const webRecognitionRef = useRef<any>(null);
+  const mascotMoodRef = useRef<MascotMood>("idle");
+  const recordingIntentRef = useRef<RecordingIntent>("chat");
   const [isRecording, setIsRecording] = useState(false);
   const [isThinking, setIsThinking] = useState(false);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+  const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
+  const [videoUri, setVideoUri] = useState<string | null>(null);
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const [recordingIntent, setRecordingIntent] = useState<RecordingIntent>("chat");
   const [userId, setUserId] = useState<string>("anon");
   const [remainingCredits, setRemainingCredits] = useState<number | null>(null);
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [apiBaseUrl, setApiBaseUrl] = useState<string>(API_BASE_URL);
   const [apiBaseUrlInput, setApiBaseUrlInput] = useState<string>(API_BASE_URL);
   const [isSavingApiUrl, setIsSavingApiUrl] = useState(false);
+  const [adsConsent, setAdsConsent] = useState(false);
+  const [isSyncingAdsConsent, setIsSyncingAdsConsent] = useState(false);
+  const [childAge, setChildAge] = useState<number>(DEFAULT_CHILD_AGE);
+  const [childMode, setChildMode] = useState<ChildMode>("teacher");
+  const [conversationId, setConversationId] = useState<string>(
+    () => `conv_${Date.now()}_${Math.floor(Math.random() * 100000)}`
+  );
+  const [appLanguage, setAppLanguage] = useState<AppLanguage>("es");
+  const [selectedMascotId, setSelectedMascotId] = useState<string>(DEFAULT_MASCOT.id);
+    const [mascotMood, setMascotMood] = useState<MascotMood>("idle");
+  const [speechLevel, setSpeechLevel] = useState(0);
   const scrollRef = useRef<ScrollView>(null);
   const [textInput, setTextInput] = useState("");
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: "welcome",
       role: "assistant",
-      text: "Hola, soy GaIA. Mantén pulsado el botón y háblame.",
+      text: "¡Hola! Soy tu asistente de aprendizaje. ¿Qué quieres descubrir hoy?",
     },
   ]);
 
   const canTalk = useMemo(() => Boolean(apiBaseUrl.trim()), [apiBaseUrl]);
+  const selectedMascot = useMemo(
+    () => MASCOTS.find((mascot) => mascot.id === selectedMascotId) || DEFAULT_MASCOT,
+    [selectedMascotId]
+  );
   const isLikelyLocalhost = useMemo(
     () => apiBaseUrl.includes("localhost") || apiBaseUrl.includes("127.0.0.1"),
     [apiBaseUrl]
   );
+
+    const mascotReaction = useMemo(
+      () => selectedMascot.reactions[mascotMood],
+      [mascotMood, selectedMascot]
+    );
+
+    const mascotMoodBadge = useMemo(() => {
+      switch (mascotMood) {
+        case "thinking": return "🤔";
+        case "happy": return "🌟";
+        case "listening": return "👂";
+        case "speaking": return "🗣️";
+        default: return null;
+      }
+    }, [mascotMood]);
+
+    function setMood(mood: MascotMood) {
+      mascotMoodRef.current = mood;
+      setMascotMood(mood);
+    }
+
+    function setMoodHappy() {
+      if (mascotHappyTimer.current) clearTimeout(mascotHappyTimer.current);
+      setMood("happy");
+      mascotHappyTimer.current = setTimeout(() => setMood("idle"), 3000);
+    }
+
+    function stopSpeechPulse() {
+      if (speechPulseTimer.current) {
+        clearInterval(speechPulseTimer.current);
+        speechPulseTimer.current = null;
+      }
+      speechPhaseRef.current = 0;
+      setSpeechLevel(0);
+    }
+
+    function startSpeechPulse(text: string) {
+      stopSpeechPulse();
+
+      const words = Math.max(text.trim().split(/\s+/).length, 1);
+      const cadenceMs = Math.max(70, Math.min(140, 130 - Math.floor(words / 4)));
+      setSpeechLevel(0.18);
+
+      speechPulseTimer.current = setInterval(() => {
+        speechPhaseRef.current += 0.36;
+        const wave = (Math.sin(speechPhaseRef.current * 2.9) + 1) / 2;
+        const jitter = Math.random() * 0.24;
+        const next = Math.min(1, 0.2 + wave * 0.55 + jitter);
+        setSpeechLevel(next);
+      }, cadenceMs);
+    }
+
+    function speakWithMascot(text: string, doneMood: MascotMood = "idle") {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+
+      if (mascotHappyTimer.current) clearTimeout(mascotHappyTimer.current);
+      stopSpeechPulse();
+      Speech.stop();
+      Speech.speak(trimmed, {
+        language: LANGUAGES.find((l) => l.id === appLanguage)?.speechCode ?? "es-ES",
+        rate: 0.95,
+        pitch: 1.0,
+        onStart: () => {
+          setMood("speaking");
+          startSpeechPulse(trimmed);
+        },
+        onDone: () => {
+          stopSpeechPulse();
+          if (doneMood === "happy") {
+            setMoodHappy();
+            return;
+          }
+
+          if (mascotMoodRef.current === "speaking") {
+            setMood(doneMood);
+          }
+        },
+        onStopped: () => {
+          stopSpeechPulse();
+          if (mascotMoodRef.current === "speaking") {
+            setMood("idle");
+          }
+        },
+        onError: () => {
+          stopSpeechPulse();
+          if (mascotMoodRef.current === "speaking") {
+            setMood("idle");
+          }
+        },
+      });
+    }
+
+    function triggerMascotBounce() {
+      Animated.sequence([
+        Animated.timing(mascotBounceAnim, { toValue: 1.25, duration: 110, useNativeDriver: true }),
+        Animated.spring(mascotBounceAnim, { toValue: 1, friction: 4, tension: 180, useNativeDriver: true }),
+      ]).start();
+    }
 
   useEffect(() => {
     void initUser();
@@ -94,18 +406,54 @@ export default function App() {
     ).start();
   }, [floatAnim, pulseAnim]);
 
+    useEffect(() => {
+      return () => {
+        if (mascotHappyTimer.current) clearTimeout(mascotHappyTimer.current);
+        if (speechPulseTimer.current) clearInterval(speechPulseTimer.current);
+      };
+    }, []);
+
   async function initUser() {
     try {
       const savedApiUrl = await AsyncStorage.getItem(API_BASE_URL_KEY);
       if (savedApiUrl?.trim()) {
-        setApiBaseUrl(savedApiUrl.trim());
-        setApiBaseUrlInput(savedApiUrl.trim());
+        const nextApiUrl =
+          isLoopbackApiUrl(savedApiUrl) && !isLoopbackApiUrl(API_BASE_URL)
+            ? API_BASE_URL
+            : savedApiUrl.trim();
+
+        if (nextApiUrl !== savedApiUrl.trim()) {
+          await AsyncStorage.setItem(API_BASE_URL_KEY, nextApiUrl);
+        }
+
+        setApiBaseUrl(nextApiUrl);
+        setApiBaseUrlInput(nextApiUrl);
       }
+
+      const savedMascotId = await AsyncStorage.getItem(MASCOT_KEY);
+      if (savedMascotId && MASCOTS.some((mascot) => mascot.id === savedMascotId)) {
+        setSelectedMascotId(savedMascotId);
+      }
+
+      const savedLanguage = await AsyncStorage.getItem(LANGUAGE_KEY);
+      if (savedLanguage && LANGUAGES.some((l) => l.id === savedLanguage)) {
+        setAppLanguage(savedLanguage as AppLanguage);
+      }
+
+      const savedAgeRaw = await AsyncStorage.getItem(CHILD_AGE_KEY);
+      const parsedAge = Number.parseInt(savedAgeRaw || "", 10);
+      const safeAge = Number.isFinite(parsedAge) ? Math.min(14, Math.max(3, parsedAge)) : DEFAULT_CHILD_AGE;
+      setChildAge(safeAge);
+
+      const savedAdsConsent = await AsyncStorage.getItem(ADS_CONSENT_KEY);
+      const consent = savedAdsConsent === "1";
+      setAdsConsent(consent);
 
       const saved = await AsyncStorage.getItem(USER_ID_KEY);
       if (saved) {
         setUserId(saved);
         await refreshCredits(saved);
+        await syncLearningSettings(saved, safeAge, consent);
         return;
       }
 
@@ -113,9 +461,77 @@ export default function App() {
       await AsyncStorage.setItem(USER_ID_KEY, generated);
       setUserId(generated);
       await refreshCredits(generated);
+      await syncLearningSettings(generated, safeAge, consent);
     } catch (error) {
       setUserId("anon");
       await refreshCredits("anon");
+    }
+  }
+
+  async function syncLearningSettings(currentUserId: string, age: number, consentAds: boolean) {
+    try {
+      const payload = {
+        userId: currentUserId,
+        age,
+        consent: {
+          dataCollection: true,
+          personalization: true,
+          adsTargeting: consentAds,
+          consentedBy: "parent",
+        },
+      };
+
+      const createResponse = await apiFetch("/learning/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+
+      if (createResponse.ok) return;
+
+      await apiFetch("/learning/age", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: currentUserId, age }),
+      });
+
+      await apiFetch("/learning/consent", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: currentUserId,
+          consent: {
+            adsTargeting: consentAds,
+            consentedBy: "parent",
+          },
+        }),
+      });
+    } catch {
+      // Si learning no esta disponible, no bloqueamos la app.
+    }
+  }
+
+  async function onToggleAdsConsent(next: boolean) {
+    setAdsConsent(next);
+    try {
+      setIsSyncingAdsConsent(true);
+      await AsyncStorage.setItem(ADS_CONSENT_KEY, next ? "1" : "0");
+      await syncLearningSettings(userId, childAge, next);
+    } catch {
+      Alert.alert("Consentimiento", "No se pudo guardar el consentimiento ahora mismo.");
+    } finally {
+      setIsSyncingAdsConsent(false);
+    }
+  }
+
+  async function onSelectAge(nextAge: number) {
+    if (nextAge === childAge) return;
+    setChildAge(nextAge);
+    try {
+      await AsyncStorage.setItem(CHILD_AGE_KEY, String(nextAge));
+      await syncLearningSettings(userId, nextAge, adsConsent);
+    } catch {
+      Alert.alert("Edad", "No se pudo guardar la edad en este momento.");
     }
   }
 
@@ -134,7 +550,25 @@ export default function App() {
     }
   }
 
-  async function startRecording() {
+  async function handleRecognizedText(userText: string, currentIntent: RecordingIntent) {
+    if (currentIntent === "dictation") {
+      setTextInput((prev) => {
+        const prefix = prev.trim();
+        return prefix ? `${prefix} ${userText}` : userText;
+      });
+      return;
+    }
+
+    setMood("thinking");
+    const historySnapshot = messages;
+    pushMessage("user", userText);
+
+    const { answer, webSearchUsed } = await askAssistant(userText, historySnapshot);
+    pushMessage("assistant", answer, webSearchUsed);
+    speakWithMascot(answer, "happy");
+  }
+
+  async function startRecording(intent: RecordingIntent = "chat") {
     if (!canTalk) {
       Alert.alert(
         "Falta URL del backend",
@@ -144,6 +578,67 @@ export default function App() {
     }
 
     try {
+      recordingIntentRef.current = intent;
+      setRecordingIntent(intent);
+
+      if (isWeb) {
+        const WebSpeech = (globalThis as any).SpeechRecognition || (globalThis as any).webkitSpeechRecognition;
+        if (!WebSpeech) {
+          Alert.alert("Micrófono no compatible", "Tu navegador no soporta reconocimiento de voz.");
+          return;
+        }
+
+        const recognition = new WebSpeech();
+        recognition.lang = "es-ES";
+        recognition.continuous = false;
+        recognition.interimResults = true;
+
+        let transcript = "";
+
+        recognition.onresult = (event: any) => {
+          let next = "";
+          for (let i = event.resultIndex; i < event.results.length; i += 1) {
+            next += event.results[i][0]?.transcript || "";
+          }
+          transcript = next.trim();
+        };
+
+        recognition.onerror = () => {
+          setIsRecording(false);
+          if (mascotMoodRef.current !== "happy") setMood("idle");
+          Alert.alert("Error", "No pude escuchar el audio del navegador.");
+        };
+
+        recognition.onend = async () => {
+          setIsRecording(false);
+          recordingIntentRef.current = "chat";
+          setRecordingIntent("chat");
+
+          const finalText = transcript.trim();
+          if (!finalText) {
+            if (mascotMoodRef.current !== "happy") setMood("idle");
+            return;
+          }
+
+          setIsThinking(true);
+          try {
+            await handleRecognizedText(finalText, intent);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "No pude procesar tu audio.";
+            Alert.alert("Error", message);
+          } finally {
+            if (mascotMoodRef.current !== "happy") setMood("idle");
+            setIsThinking(false);
+          }
+        };
+
+        webRecognitionRef.current = recognition;
+        setIsRecording(true);
+        setMood("listening");
+        recognition.start();
+        return;
+      }
+
       const permission = await Audio.requestPermissionsAsync();
       if (!permission.granted) {
         Alert.alert("Permiso denegado", "Necesito acceso al micrófono.");
@@ -160,15 +655,29 @@ export default function App() {
       await rec.startAsync();
       setRecording(rec);
       setIsRecording(true);
+      setMood("listening");
     } catch (error) {
       Alert.alert("Error", "No pude iniciar la grabación.");
     }
   }
 
   async function stopRecording() {
+    if (isWeb) {
+      const webRecognition = webRecognitionRef.current;
+      if (webRecognition) {
+        try {
+          webRecognition.stop();
+        } catch {
+          // Ignorar si ya se detuvo.
+        }
+      }
+      return;
+    }
+
     if (!recording) return;
 
     try {
+      const currentIntent = recordingIntentRef.current;
       setIsRecording(false);
       setIsThinking(true);
       await recording.stopAndUnloadAsync();
@@ -178,22 +687,14 @@ export default function App() {
       if (!uri) throw new Error("No se obtuvo el audio");
 
       const userText = await transcribeAudio(uri);
-      const historySnapshot = messages;
-      pushMessage("user", userText);
-
-      const answer = await askAssistant(userText, historySnapshot);
-      pushMessage("assistant", answer);
-
-      Speech.stop();
-      Speech.speak(answer, {
-        language: "es-ES",
-        rate: 0.95,
-        pitch: 1.0,
-      });
+      await handleRecognizedText(userText, currentIntent);
     } catch (error) {
       const message = error instanceof Error ? error.message : "No pude procesar tu audio.";
       Alert.alert("Error", message);
     } finally {
+      recordingIntentRef.current = "chat";
+      setRecordingIntent("chat");
+      if (mascotMoodRef.current !== "happy") setMood("idle");
       setIsThinking(false);
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
@@ -201,10 +702,10 @@ export default function App() {
     }
   }
 
-  function pushMessage(role: "user" | "assistant", text: string) {
+  function pushMessage(role: "user" | "assistant", text: string, webSearchUsed?: boolean) {
     setMessages((prev) => [
       ...prev,
-      { id: `${Date.now()}-${Math.random()}`, role, text },
+      { id: `${Date.now()}-${Math.random()}`, role, text, webSearchUsed },
     ]);
     setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
   }
@@ -217,27 +718,96 @@ export default function App() {
     const historySnapshot = messages;
     pushMessage("user", trimmed);
     setIsThinking(true);
+      setMood("thinking");
     try {
-      const answer = await askAssistant(trimmed, historySnapshot);
-      pushMessage("assistant", answer);
-      Speech.stop();
-      Speech.speak(answer, { language: "es-ES", rate: 0.95, pitch: 1.0 });
+      const { answer, webSearchUsed } = await askAssistant(trimmed, historySnapshot);
+      pushMessage("assistant", answer, webSearchUsed);
+      speakWithMascot(answer, "happy");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "No pude procesar tu mensaje.";
-      Alert.alert("Error", message);
+      const message = toUserFriendlyError(error);
+      pushMessage("assistant", message);
     } finally {
+        if (mascotMoodRef.current !== "happy") setMood("idle");
       setIsThinking(false);
     }
   }
 
-  async function apiFetch(path: string, options?: RequestInit): Promise<Response> {
+  function speakTextAloud(text: string) {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      Alert.alert("Texto vacio", "Escribe un texto para leerlo en voz alta.");
+      return;
+    }
+
+    speakWithMascot(trimmed, "idle");
+  }
+
+  function speakCurrentText() {
+    if (textInput.trim()) {
+      speakTextAloud(textInput);
+      return;
+    }
+
+    const lastAssistantMessage = [...messages].reverse().find((message) => message.role === "assistant");
+    if (lastAssistantMessage) {
+      speakTextAloud(lastAssistantMessage.text);
+      return;
+    }
+
+    Alert.alert("Sin texto", "Escribe algo o genera una respuesta para poder leerla.");
+  }
+
+  function toUserFriendlyError(error: unknown): string {
+    const raw = error instanceof Error ? error.message : "No pude procesar tu mensaje.";
+
+    if (/timeout|tiempo de espera/i.test(raw)) {
+      return "Estoy tardando demasiado en responder. Verifica que el backend este activo y vuelve a intentarlo.";
+    }
+
+    if (/Failed to fetch|NetworkError|network/i.test(raw)) {
+      if (!isWeb && isLikelyLocalhost) {
+        return "No puedo conectarme porque en movil 'localhost' no apunta a tu PC. Cambia la URL por la IP local (ejemplo: http://192.168.1.25:4000).";
+      }
+      return "No pude conectar con el backend. Revisa la URL y que el servidor este encendido.";
+    }
+
+    if (/Sin creditos diarios|Sin creditos/i.test(raw)) {
+      return "Te has quedado sin creditos por hoy. Podemos seguir con respuestas cortas o volver manana.";
+    }
+
+    return `No pude responder ahora mismo: ${raw}`;
+  }
+
+  async function fetchWithTimeout(url: string, options?: RequestInit, timeoutMs = 15000): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new Error("timeout");
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  async function apiFetch(path: string, options?: RequestInit, timeoutMs = 18000): Promise<Response> {
     const base = apiBaseUrl.trim();
-    const v1 = await fetch(`${base}/api/v1${path}`, options);
+    if (!base) {
+      throw new Error("Configura la URL del backend.");
+    }
+
+    const v1 = await fetchWithTimeout(`${base}/api/v1${path}`, options, timeoutMs);
     if (v1.status !== 404) {
       return v1;
     }
 
-    return fetch(`${base}/api${path}`, options);
+    return fetchWithTimeout(`${base}/api${path}`, options, timeoutMs);
   }
 
   async function saveApiBaseUrl() {
@@ -262,6 +832,16 @@ export default function App() {
       Alert.alert("Error", "No pude guardar la URL del backend.");
     } finally {
       setIsSavingApiUrl(false);
+    }
+  }
+
+  async function selectMascot(mascotId: string) {
+    setSelectedMascotId(mascotId);
+      triggerMascotBounce();
+    try {
+      await AsyncStorage.setItem(MASCOT_KEY, mascotId);
+    } catch {
+      // No interrumpir UX si no se puede persistir la mascota.
     }
   }
 
@@ -300,20 +880,27 @@ export default function App() {
     return data.text?.trim() || "No entendí claramente el audio.";
   }
 
-  async function askAssistant(userText: string, history: ChatMessage[]): Promise<string> {
-    const response = await apiFetch("/chat", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
+  async function askAssistant(
+    userText: string,
+    history: ChatMessage[]
+  ): Promise<{ answer: string; webSearchUsed: boolean }> {
+    const response = await apiFetch(
+      "/chat",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId,
+          text: userText,
+          mode: childMode,
+          conversationId,
+          history: history
+            .filter((m) => m.id !== "welcome")
+            .map((m) => ({ role: m.role, text: m.text })),
+        }),
       },
-      body: JSON.stringify({
-        userId,
-        text: userText,
-        history: history
-          .filter((m) => m.id !== "welcome")
-          .map((m) => ({ role: m.role, text: m.text })),
-      }),
-    });
+      35000
+    );
 
     if (!response.ok) {
       const details = await readApiError(response, "No se pudo generar respuesta.");
@@ -323,17 +910,27 @@ export default function App() {
     const data = (await response.json()) as {
       answer?: string;
       remainingCredits?: number;
+      webSearchUsed?: boolean;
     };
 
     if (typeof data.remainingCredits === "number") {
       setRemainingCredits(data.remainingCredits);
     }
 
-    return data.answer?.trim() || "No pude generar una respuesta en este momento.";
+    return {
+      answer: data.answer?.trim() || "No pude generar una respuesta en este momento.",
+      webSearchUsed: Boolean(data.webSearchUsed),
+    };
   }
 
   async function generateImage() {
     try {
+      const prompt = textInput.trim();
+      if (!prompt) {
+        Alert.alert("Prompt vacio", "Escribe un texto para generar la imagen.");
+        return;
+      }
+
       setIsGeneratingImage(true);
       const response = await apiFetch("/images", {
         method: "POST",
@@ -342,7 +939,7 @@ export default function App() {
         },
         body: JSON.stringify({
           userId,
-          prompt: "Un bosque mediterraneo al atardecer con estilo cinematografico",
+          prompt,
         }),
       });
 
@@ -368,6 +965,43 @@ export default function App() {
       Alert.alert("Imagen", message);
     } finally {
       setIsGeneratingImage(false);
+    }
+  }
+
+  async function generateVideo() {
+    try {
+      const prompt = textInput.trim();
+      if (!prompt) {
+        Alert.alert("Prompt vacío", "Escribe un texto para generar el video.");
+        return;
+      }
+      setIsGeneratingVideo(true);
+      const response = await apiFetch("/videos", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, prompt }),
+      });
+      if (!response.ok) {
+        const details = await readApiError(response, "No se pudo generar el video.");
+        throw new Error(details);
+      }
+      const data = (await response.json()) as {
+        videoBase64?: string;
+        mimeType?: string;
+        remainingCredits?: number;
+      };
+      if (typeof data.remainingCredits === "number") {
+        setRemainingCredits(data.remainingCredits);
+      }
+      if (data.videoBase64) {
+        const mime = data.mimeType ?? "video/mp4";
+        setVideoUri(`data:${mime};base64,${data.videoBase64}`);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "No se pudo generar el video ahora mismo.";
+      Alert.alert("Video", message);
+    } finally {
+      setIsGeneratingVideo(false);
     }
   }
 
@@ -423,8 +1057,78 @@ export default function App() {
       </View>
       <View style={styles.header}>
         <Text style={styles.title}>GaIA Voice</Text>
-        <Text style={styles.subtitle}>Asistente virtual con voz</Text>
+        <Text style={styles.subtitle}>Asistente infantil para aprender y jugar</Text>
         <Text style={styles.credits}>Creditos restantes: {remainingCredits ?? "..."}</Text>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.modeRow}
+          contentContainerStyle={styles.modeRowContent}
+        >
+          {SPEECH_MODES.map((m) => (
+            <Pressable
+              key={m.id}
+              onPress={() => setChildMode(m.id)}
+              style={[styles.modeChip, childMode === m.id && styles.modeChipActive]}
+            >
+              <Text style={styles.modeChipEmoji}>{m.emoji}</Text>
+              <Text style={[styles.modeChipText, childMode === m.id && styles.modeChipTextActive]}>
+                {m.label}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.languageRow}
+          contentContainerStyle={styles.modeRowContent}
+        >
+          {LANGUAGES.map((lang) => (
+            <Pressable
+              key={lang.id}
+              onPress={() => {
+                setAppLanguage(lang.id);
+                void AsyncStorage.setItem(LANGUAGE_KEY, lang.id);
+              }}
+              style={[styles.modeChip, appLanguage === lang.id && styles.modeChipActive]}
+            >
+              <Text style={styles.modeChipEmoji}>{lang.flag}</Text>
+              <Text style={[styles.modeChipText, appLanguage === lang.id && styles.modeChipTextActive]}>
+                {lang.label}
+              </Text>
+            </Pressable>
+          ))}
+        </ScrollView>
+        <View style={styles.ageRow}>
+          <Text style={styles.ageLabel}>Edad:</Text>
+          {[6, 9, 12, 14].map((age) => (
+            <Pressable
+              key={age}
+              onPress={() => void onSelectAge(age)}
+              style={[styles.ageChip, childAge === age && styles.ageChipActive]}
+            >
+              <Text style={[styles.ageChipText, childAge === age && styles.ageChipTextActive]}>
+                {age} anos
+              </Text>
+            </Pressable>
+          ))}
+        </View>
+        <View style={styles.adsConsentRow}>
+          <View style={styles.adsConsentTextBlock}>
+            <Text style={styles.adsConsentTitle}>Publicidad personalizada</Text>
+            <Text style={styles.adsConsentSubtitle}>
+              Activa solo con consentimiento parental. Puedes desactivarla cuando quieras.
+            </Text>
+          </View>
+          <Switch
+            value={adsConsent}
+            onValueChange={(next) => void onToggleAdsConsent(next)}
+            disabled={isSyncingAdsConsent}
+            trackColor={{ false: "#a6b5d8", true: "#4e9a5d" }}
+            thumbColor={adsConsent ? "#f3fff4" : "#eef1fb"}
+          />
+        </View>
         <View style={styles.backendRow}>
           <TextInput
             style={styles.backendInput}
@@ -446,17 +1150,70 @@ export default function App() {
         </View>
       </View>
 
-      <ScrollView ref={scrollRef} contentContainerStyle={styles.chat}>
+      {!isCompactLayout && (
+        <View style={styles.mascotCenterSection}>
+          <MascotRoom
+            mascot={selectedMascot}
+            mood={mascotMood}
+            bounceAnim={mascotBounceAnim}
+            speakingLevel={speechLevel}
+          />
+
+          <View style={styles.mascotInfoBar}>
+            <Text style={styles.mascotTitleLarge}>{selectedMascot.name}</Text>
+            <Text style={styles.mascotPersonalityLarge}>{selectedMascot.personality}</Text>
+            <Text style={styles.mascotSubtitleLarge}>{mascotReaction}</Text>
+          </View>
+
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.mascotSelector}
+          >
+            {MASCOTS.map((mascot) => (
+              <Pressable
+                key={mascot.id}
+                onPress={() => selectMascot(mascot.id)}
+                style={[
+                  styles.mascotChip,
+                  selectedMascotId === mascot.id && styles.mascotChipActive,
+                ]}
+              >
+                <Text style={styles.mascotChipEmoji}>{mascot.emoji}</Text>
+                <Text style={[styles.mascotChipText, selectedMascotId === mascot.id && styles.mascotChipTextActive]}>
+                  {mascot.name}
+                </Text>
+              </Pressable>
+            ))}
+          </ScrollView>
+        </View>
+      )}
+
+      {isCompactLayout && (
+        <View style={styles.compactMascotBar}>
+          <Text style={styles.compactMascotText}>{selectedMascot.emoji} {selectedMascot.name}: {mascotReaction}</Text>
+        </View>
+      )}
+
+      <ScrollView
+        ref={scrollRef}
+        style={styles.chatList}
+        contentContainerStyle={styles.chat}
+        onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
         {messages.map((message) => (
           <View
             key={message.id}
             style={[
               styles.bubble,
               message.role === "user" ? styles.userBubble : styles.assistantBubble,
+              message.role === "user" ? styles.bubbleRight : styles.bubbleLeft,
             ]}
           >
             <Text style={styles.bubbleLabel}>
-              {message.role === "user" ? "Tu" : "GaIA"}
+              {message.role === "user" ? "Tú" : message.webSearchUsed ? `${selectedMascot.name} 🌐` : selectedMascot.name}
             </Text>
             <Text style={styles.bubbleText}>{message.text}</Text>
           </View>
@@ -470,16 +1227,32 @@ export default function App() {
           disabled={isGeneratingImage || isThinking}
         >
           <Text style={styles.imageButtonText}>
-            {isGeneratingImage ? "Generando imagen..." : "Generar imagen"}
+            {isGeneratingImage ? "Generando imagen..." : "Texto a imagen"}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          onPress={generateVideo}
+          style={[styles.imageButton, styles.videoButton, isGeneratingVideo && styles.imageButtonActive]}
+          disabled={isGeneratingVideo || isGeneratingImage || isThinking}
+        >
+          <Text style={styles.imageButtonText}>
+            {isGeneratingVideo ? "Generando video..." : "Texto a video 🎬"}
           </Text>
         </Pressable>
 
         {imageUri && <Image source={{ uri: imageUri }} style={styles.previewImage} />}
 
+        {videoUri && isWeb && React.createElement("video", {
+          src: videoUri,
+          controls: true,
+          style: { width: "100%", maxHeight: 200, marginTop: 6, borderRadius: 10 },
+        })}
+
         <View style={styles.textRow}>
           <TextInput
             style={styles.textInputField}
-            placeholder="Escribe un mensaje..."
+            placeholder="Escribe para chatear, leer o generar imagen..."
             placeholderTextColor="#999"
             value={textInput}
             onChangeText={setTextInput}
@@ -495,16 +1268,65 @@ export default function App() {
           >
             <Text style={styles.sendButtonText}>↑</Text>
           </Pressable>
+          <Pressable
+            onPress={speakCurrentText}
+            style={[styles.utilityButton, isRecording && styles.utilityButtonDisabled]}
+            disabled={isRecording}
+          >
+            <Text style={styles.utilityButtonText}>Leer</Text>
+          </Pressable>
         </View>
 
         <Pressable
-          onPressIn={startRecording}
-          onPressOut={stopRecording}
-          style={[styles.button, isRecording && styles.buttonActive]}
+          onPress={
+            isWeb
+              ? () =>
+                  isRecording && recordingIntent === "chat"
+                    ? void stopRecording()
+                    : void startRecording("chat")
+              : undefined
+          }
+          onPressIn={!isWeb ? () => startRecording("chat") : undefined}
+          onPressOut={!isWeb ? stopRecording : undefined}
+          style={[styles.button, isRecording && recordingIntent === "chat" && styles.buttonActive]}
           disabled={isThinking}
         >
           <Text style={styles.buttonText}>
-            {isRecording ? "Escuchando..." : "Mantener para hablar"}
+            {isWeb
+              ? isRecording && recordingIntent === "chat"
+                ? "Detener escucha"
+                : "Tocar para hablar"
+              : isRecording && recordingIntent === "chat"
+                ? "Escuchando..."
+                : "Mantener para hablar"}
+          </Text>
+        </Pressable>
+
+        <Pressable
+          onPress={
+            isWeb
+              ? () =>
+                  isRecording && recordingIntent === "dictation"
+                    ? void stopRecording()
+                    : void startRecording("dictation")
+              : undefined
+          }
+          onPressIn={!isWeb ? () => startRecording("dictation") : undefined}
+          onPressOut={!isWeb ? stopRecording : undefined}
+          style={[
+            styles.secondaryButton,
+            isRecording && recordingIntent === "dictation" && styles.secondaryButtonActive,
+          ]}
+          disabled={isThinking}
+        >
+          <Text style={styles.secondaryButtonText}>
+            {isWeb
+              ? isRecording && recordingIntent === "dictation"
+                ? "Detener dictado"
+                : "Tocar para dictar"
+              : isRecording && recordingIntent === "dictation"
+                ? "Dictando..."
+                : "Mantener para dictar texto"}
           </Text>
         </Pressable>
 
@@ -521,16 +1343,19 @@ export default function App() {
           </Text>
         )}
 
+        {isWeb && (
+          <Text style={styles.warning}>
+            En web, usa Chrome o Edge y permite acceso al microfono cuando lo pida el navegador.
+          </Text>
+        )}
+
         {isLikelyLocalhost && (
           <Text style={styles.warning}>
             En Android fisico, localhost no apunta a tu PC. Usa la IP local de tu equipo.
           </Text>
         )}
 
-        <View style={styles.adSlot}>
-          <Text style={styles.adLabel}>Espacio publicitario</Text>
-          <Text style={styles.adText}>Aqui se integrara AdMob Banner en la version Play Store.</Text>
-        </View>
+        <AdBanner enabled={adsConsent} />
       </View>
     </SafeAreaView>
     </KeyboardAvoidingView>
@@ -566,7 +1391,7 @@ const styles = StyleSheet.create({
   header: {
     paddingHorizontal: 20,
     paddingTop: 14,
-    paddingBottom: 8,
+    paddingBottom: 4,
   },
   title: {
     fontSize: 30,
@@ -583,6 +1408,162 @@ const styles = StyleSheet.create({
     color: "#5f44c4",
     fontSize: 13,
     fontWeight: "700",
+  },
+  mascotCenterSection: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 6,
+    alignItems: "center",
+  },
+  mascotInfoBar: {
+    marginTop: 10,
+    alignItems: "center",
+    paddingHorizontal: 8,
+  },
+  mascotTitleLarge: {
+    color: "#24376c",
+    fontSize: 22,
+    fontWeight: "900",
+  },
+  mascotPersonalityLarge: {
+    marginTop: 2,
+    color: "#2c4a88",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  mascotSubtitleLarge: {
+    marginTop: 5,
+    color: "#334b85",
+    fontSize: 13,
+    textAlign: "center",
+    lineHeight: 19,
+  },
+  mascotSelector: {
+    marginTop: 12,
+    gap: 8,
+    paddingRight: 6,
+  },
+  mascotChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: "rgba(98, 108, 190, 0.35)",
+    backgroundColor: "rgba(255,255,255,0.76)",
+    paddingHorizontal: 10,
+    paddingVertical: 7,
+  },
+  mascotChipActive: {
+    backgroundColor: "#37a5f1",
+    borderColor: "#37a5f1",
+  },
+  mascotChipEmoji: {
+    fontSize: 17,
+  },
+  mascotChipText: {
+    color: "#2f3f76",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  mascotChipTextActive: {
+    color: "white",
+  },
+  modeRow: {
+    marginTop: 10,
+  },
+  modeRowContent: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    paddingRight: 8,
+  },
+  modeChip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    borderWidth: 1,
+    borderColor: "rgba(88, 98, 180, 0.45)",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "rgba(255,255,255,0.72)",
+  },
+  modeChipActive: {
+    backgroundColor: "#2f82e8",
+    borderColor: "#2f82e8",
+  },
+  modeChipEmoji: {
+    fontSize: 13,
+  },
+  modeChipText: {
+    color: "#304074",
+    fontSize: 11,
+    fontWeight: "700",
+  },
+  modeChipTextActive: {
+    color: "white",
+  },
+  languageRow: {
+    marginTop: 8,
+  },
+  ageRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  ageLabel: {
+    color: "#304074",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  ageChip: {
+    borderWidth: 1,
+    borderColor: "rgba(88, 98, 180, 0.45)",
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: "rgba(255,255,255,0.72)",
+  },
+  ageChipActive: {
+    backgroundColor: "#3c8f6a",
+    borderColor: "#3c8f6a",
+  },
+  ageChipText: {
+    color: "#304074",
+    fontSize: 12,
+    fontWeight: "700",
+  },
+  ageChipTextActive: {
+    color: "#ffffff",
+  },
+  adsConsentRow: {
+    marginTop: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    backgroundColor: "rgba(255,255,255,0.62)",
+    borderWidth: 1,
+    borderColor: "rgba(88, 98, 180, 0.25)",
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  adsConsentTextBlock: {
+    flex: 1,
+  },
+  adsConsentTitle: {
+    color: "#2f3f76",
+    fontSize: 12,
+    fontWeight: "800",
+  },
+  adsConsentSubtitle: {
+    marginTop: 2,
+    color: "#4c5b8b",
+    fontSize: 11,
   },
   backendRow: {
     marginTop: 10,
@@ -619,10 +1600,21 @@ const styles = StyleSheet.create({
     padding: 16,
     gap: 12,
     paddingBottom: 18,
+    flexGrow: 1,
+  },
+  chatList: {
+    flex: 1,
   },
   bubble: {
     borderRadius: 18,
     padding: 13,
+    maxWidth: "92%",
+  },
+  bubbleLeft: {
+    alignSelf: "flex-start",
+  },
+  bubbleRight: {
+    alignSelf: "flex-end",
   },
   userBubble: {
     backgroundColor: "rgba(124, 94, 255, 0.18)",
@@ -641,9 +1633,26 @@ const styles = StyleSheet.create({
     color: "#4a5384",
   },
   bubbleText: {
-    fontSize: 16,
+    fontSize: 15,
     color: "#1f2747",
-    lineHeight: 22,
+    lineHeight: 23,
+    flexShrink: 1,
+  },
+  compactMascotBar: {
+    marginHorizontal: 16,
+    marginTop: 6,
+    marginBottom: 6,
+    borderRadius: 12,
+    backgroundColor: "rgba(255,255,255,0.72)",
+    borderWidth: 1,
+    borderColor: "rgba(88, 98, 180, 0.22)",
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+  },
+  compactMascotText: {
+    color: "#2f3f76",
+    fontSize: 12,
+    fontWeight: "700",
   },
   footer: {
     paddingHorizontal: 16,
@@ -688,6 +1697,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     alignItems: "center",
   },
+  videoButton: {
+    backgroundColor: "#7a48cc",
+    marginTop: 6,
+  },
   imageButtonActive: {
     backgroundColor: "#2e7fc0",
   },
@@ -703,25 +1716,6 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "rgba(255,255,255,0.95)",
-  },
-  adSlot: {
-    marginTop: 12,
-    borderWidth: 1,
-    borderColor: "rgba(140, 134, 219, 0.4)",
-    borderStyle: "dashed",
-    borderRadius: 10,
-    backgroundColor: "rgba(255,255,255,0.62)",
-    paddingVertical: 10,
-    paddingHorizontal: 12,
-  },
-  adLabel: {
-    fontWeight: "700",
-    color: "#46518a",
-    marginBottom: 2,
-  },
-  adText: {
-    color: "#516091",
-    fontSize: 12,
   },
   textRow: {
     flexDirection: "row",
@@ -754,6 +1748,40 @@ const styles = StyleSheet.create({
   sendButtonText: {
     color: "white",
     fontSize: 20,
+    fontWeight: "700",
+  },
+  utilityButton: {
+    backgroundColor: "#1c8c7f",
+    minWidth: 58,
+    height: 44,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  utilityButtonDisabled: {
+    backgroundColor: "#85bdb6",
+  },
+  utilityButtonText: {
+    color: "white",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  secondaryButton: {
+    backgroundColor: "rgba(28, 140, 127, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(28, 140, 127, 0.35)",
+    paddingVertical: 13,
+    borderRadius: 14,
+    alignItems: "center",
+    marginTop: 10,
+  },
+  secondaryButtonActive: {
+    backgroundColor: "rgba(28, 140, 127, 0.2)",
+  },
+  secondaryButtonText: {
+    color: "#17675f",
+    fontSize: 15,
     fontWeight: "700",
   },
 });

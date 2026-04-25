@@ -9,18 +9,27 @@
       "backgroundColor": "#f4f1e8"
     },
     "ios": {
+      "bundleIdentifier": "com.gaia.voiceassistant",
       "supportsTablet": true,
       "infoPlist": {
         "NSMicrophoneUsageDescription": "GaIA usa tu micrófono para escucharte y responderte con IA."
       }
     },
     "android": {
+      "package": "com.gaia.voiceassistant",
       "permissions": [
         "RECORD_AUDIO"
       ]
     },
     "plugins": [
-      "expo-asset"
+      "expo-asset",
+      [
+        "react-native-google-mobile-ads",
+        {
+          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
+          "iosAppId": "ca-app-pub-3940256099942544~1458002511"
+        }
+      ]
     ]
   }
 }

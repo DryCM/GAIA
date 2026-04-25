@@ -1,3 +1,13 @@
+/* ================================================================
+   GaIA Express Application / Aplicación Express
+   ES: Configura la aplicación Express con middlewares, rutas y
+       opcionalmente sirve el build web y los assets de mascotas.
+   EN: Configures the Express application with middlewares, routes
+       and optionally serves the web build and mascot assets.
+   ================================================================ */
+
+// ES: Carga las variables de entorno del archivo .env al arrancar.
+// EN: Loads environment variables from the .env file on startup.
 import "dotenv/config";
 import cors from "cors";
 import express from "express";
@@ -11,25 +21,46 @@ import aiRoutes from "./routes/aiRoutes.js";
 import creditsRoutes from "./routes/creditsRoutes.js";
 import metaRoutes from "./routes/metaRoutes.js";
 import systemRoutes from "./routes/systemRoutes.js";
+import learningRoutes from "./routes/learningRoutes.js";
 
 const app = express();
 const backendSrcDir = path.dirname(fileURLToPath(import.meta.url));
+
+// ES: Directorio del build web de Expo (generado con `npx expo export`)
+// EN: Expo web build directory (generated with `npx expo export`)
 const webDistDir = path.resolve(backendSrcDir, "../../dist");
 const webIndexFile = path.join(webDistDir, "index.html");
-const hasWebBuild = fs.existsSync(webIndexFile);
 
+// ES: Directorio de assets de mascotas 3D (archivos GLB/Python)
+// EN: 3D mascot assets directory (GLB/Python files)
+const mascotAssetsDir = path.resolve(backendSrcDir, "../../assets/mascots");
+const hasWebBuild = fs.existsSync(webIndexFile);
+const hasMascotAssets = fs.existsSync(mascotAssetsDir);
+
+// ES: Middlewares globales: contexto de request, CORS, JSON (límite 2 MB)
+//     y manejo de errores de JSON malformado.
+// EN: Global middlewares: request context, CORS, JSON (2 MB limit)
+//     and malformed JSON error handling.
 app.use(requestContext);
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(jsonErrorHandler);
 
+// ES: Montar rutas de la API en /api y /api/v1 (retrocompatibilidad)
+// EN: Mount API routes at /api and /api/v1 (backwards compatibility)
 app.use(systemRoutes);
 app.use("/api", metaRoutes);
 app.use("/api", creditsRoutes);
 app.use("/api", aiRoutes);
+app.use("/api", learningRoutes);
 app.use("/api/v1", metaRoutes);
 app.use("/api/v1", creditsRoutes);
 app.use("/api/v1", aiRoutes);
+app.use("/api/v1", learningRoutes);
+
+if (hasMascotAssets) {
+	app.use("/assets/mascots", express.static(mascotAssetsDir));
+}
 
 if (hasWebBuild) {
 	app.get("/", (req, res) => {
