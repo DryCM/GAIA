@@ -160,7 +160,27 @@ function vectorise(text) {
 // EN: Returns the K Q→A pairs most similar to the query.
 //     Cosine similarity computed with tf.matMul.
 const MATCH_THRESHOLD = 0.18;   // ES: similitud mínima aceptable / EN: minimum acceptable similarity
-const HIGH_CONFIDENCE  = 0.45;  // ES: umbral de alta confianza; por encima no se necesita web / EN: high-confidence threshold; above this no web search needed
+const HIGH_CONFIDENCE  = 0.32;  // ES: umbral de alta confianza; por encima no se necesita web / EN: high-confidence threshold; above this no web search needed
+
+// ES: Caché de últimas N respuestas por conversación para evitar repeticiones.
+//     Clave: conversationId (o userId si no hay conversación). Valor: array circular.
+// EN: Cache of last N answers per conversation to avoid repetition.
+const RECENT_ANSWERS = new Map(); // key → string[]
+const MAX_RECENT = 5;
+
+function wasRecentlyUsed(convKey, answer) {
+  const arr = RECENT_ANSWERS.get(convKey);
+  if (!arr) return false;
+  const norm = answer.trim().toLowerCase().slice(0, 80);
+  return arr.some((a) => a.trim().toLowerCase().slice(0, 80) === norm);
+}
+
+function recordAnswer(convKey, answer) {
+  if (!RECENT_ANSWERS.has(convKey)) RECENT_ANSWERS.set(convKey, []);
+  const arr = RECENT_ANSWERS.get(convKey);
+  arr.push(answer);
+  if (arr.length > MAX_RECENT) arr.shift();
+}
 
 function findMatches(query, topK = 3) {
   buildIndex();
@@ -472,37 +492,6 @@ function extractLastTopic(history) {
   return null;
 }
 
-// ── Detección de seguimiento / Follow-up detection ────────────────────────
-// ES: Detecta mensajes de tipo "cuentame más", "continua", "quiero saber más".
-// EN: Detects "tell me more", "continue", "I want to know more" messages.
-const FOLLOWUP_PATTERNS = [
-  /^(cu[eé]ntame m[aá]s|dime m[aá]s|qu[eé] m[aá]s)\b/i,
-  /^(m[aá]s (sobre|de|acerca))\b/i,
-  /^(sigue|contin[uú]a|adelante)\b/i,
-  /\b(quiero saber m[aá]s|m[aá]s informaci[oó]n|m[aá]s detalles)\b/i,
-  /\b(de eso|sobre eso|del tema|de lo mismo|m[aá]s de eso)\b/i,
-  /^(explica m[aá]s|ampl[ií]a|profundiza|desarrolla)\b/i,
-  /^(y qu[eé] m[aá]s|c[oó]mo es eso|por qu[eé] eso)\b/i,
-];
-
-function isFollowUp(text) {
-  return FOLLOWUP_PATTERNS.some((p) => p.test(text.trim()));
-}
-
-// ES: Extrae el último tema significativo del historial de chat.
-// EN: Extracts the last significant topic from chat history.
-function extractLastTopic(history) {
-  if (!Array.isArray(history) || history.length === 0) return null;
-  for (let i = history.length - 1; i >= 0; i--) {
-    const msg = history[i];
-    if (msg.role === "user" && typeof msg.text === "string") {
-      const t = msg.text.trim();
-      if (!isFollowUp(normalise(t)) && t.length > 4) return t;
-    }
-  }
-  return null;
-}
-
 // ── Funciones auxiliares / Helper functions ───────────────────────────────
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
@@ -552,8 +541,9 @@ function wrapWithMode(rawAnswer, mode) {
 //       4. Synthesise web results locally (no external AI)
 //       5. If web returns nothing → KB or "not found"
 //       6. Wrap response with the chosen mode template
-async function tfChat({ text, mode = "teacher", history = [] }) {
+async function tfChat({ text, mode = "teacher", history = [], conversationId = null, userId = "anon" }) {
   buildIndex();   // ES: idempotente, solo construye una vez / EN: idempotent, builds once
+  const convKey = conversationId || userId;
 
   const normText = normalise(text);
 
@@ -589,17 +579,26 @@ async function tfChat({ text, mode = "teacher", history = [] }) {
   // EN: If the TF-IDF index has high confidence in the answer,
   //     return it directly without needing the internet.
   if (bestScore >= HIGH_CONFIDENCE) {
-    let kbAnswer = matches[0].item.a;
+    // ES: Si la mejor respuesta fue usada recientemente, intentar la siguiente
+    // EN: If the best answer was used recently, try the next one
+    let chosenMatch = matches[0];
+    if (wasRecentlyUsed(convKey, matches[0].item.a) && matches.length > 1) {
+      chosenMatch = matches.find((m) => !wasRecentlyUsed(convKey, m.item.a)) ?? matches[0];
+    }
+    let kbAnswer = chosenMatch.item.a;
 
     if (
       matches.length > 1 &&
-      matches[1].score >= bestScore * 0.80 &&
-      matches[1].item.topic !== matches[0].item.topic
+      matches[1].score >= bestScore * 0.78 &&
+      matches[1].item.topic !== chosenMatch.item.topic &&
+      !wasRecentlyUsed(convKey, matches[1].item.a)
     ) {
       kbAnswer += ` Además: ${matches[1].item.a}`;
     }
 
-    return { answer: wrapWithMode(kbAnswer, mode), webSearchUsed: false };
+    const finalAnswer = wrapWithMode(kbAnswer, mode);
+    recordAnswer(convKey, chosenMatch.item.a);
+    return { answer: finalAnswer, webSearchUsed: false };
   }
 
   // ── 3b. Confianza baja → búsqueda web automática ──────────────────────
@@ -616,22 +615,22 @@ async function tfChat({ text, mode = "teacher", history = [] }) {
   const webSynthesis = synthesizeFromWeb(searchQuery, webRaw);
 
   if (webSynthesis) {
-    // ES: Construir respuesta combinando síntesis web con el KB si hay match medio.
-    // EN: Build response combining web synthesis with KB if there's a medium match.
     let combinedAnswer = webSynthesis;
-
-    if (bestScore >= MATCH_THRESHOLD && matches[0].item.a) {
+    if (bestScore >= MATCH_THRESHOLD && matches[0]?.item.a && !wasRecentlyUsed(convKey, matches[0].item.a)) {
       combinedAnswer = `${matches[0].item.a} ${webSynthesis}`;
     }
-
-    return { answer: wrapWithMode(combinedAnswer, mode), webSearchUsed: true };
+    const finalAnswer = wrapWithMode(combinedAnswer, mode);
+    recordAnswer(convKey, webSynthesis);
+    return { answer: finalAnswer, webSearchUsed: true };
   }
 
   // ── 4. Fallback: KB con score medio o "no encontré" ───────────────────
-  // ES: Si la web no devolvió nada, usar el mejor match de la KB si existe.
-  // EN: If web returned nothing, use the best KB match if it exists.
   if (matches.length > 0 && bestScore >= MATCH_THRESHOLD) {
-    return { answer: wrapWithMode(matches[0].item.a, mode), webSearchUsed: false };
+    // Rotar respuestas del fallback también
+    const fallback = matches.find((m) => !wasRecentlyUsed(convKey, m.item.a)) ?? matches[0];
+    const finalAnswer = wrapWithMode(fallback.item.a, mode);
+    recordAnswer(convKey, fallback.item.a);
+    return { answer: finalAnswer, webSearchUsed: false };
   }
 
   return { answer: wrapWithMode(pick(NOT_FOUND_REPLIES), mode), webSearchUsed: false };

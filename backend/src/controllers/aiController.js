@@ -380,7 +380,7 @@ async function createChatResponse(req, res) {
       //     automáticamente cuando la confianza local es baja. Sin IA externa.
       // EN: Local TF.js provider — reasons with TF-IDF and searches the
       //     internet automatically when local confidence is low. No external AI.
-      const tfResult = await tfChat({ text: parsedText, mode: childMode, history: historyMessages });
+      const tfResult = await tfChat({ text: parsedText, mode: childMode, history: historyMessages, conversationId, userId });
       answer = tfResult.answer;
       webSearchContext = tfResult.webSearchUsed ? "__tf_internal__" : null;
     } else if (provider === "ollama") {
