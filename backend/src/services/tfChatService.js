@@ -28,16 +28,111 @@
 
 import * as tf from "@tensorflow/tfjs";
 import "@tensorflow/tfjs-backend-cpu";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { GoogleGenAI } from "@google/genai";
 import { GENERAL_KNOWLEDGE, SCHOOL_KNOWLEDGE } from "./knowledgeService.js";
 import { webSearch, extractSearchQuery } from "./webSearchService.js";
 
-// ── Corpus ─────────────────────────────────────────────────────────────────
-// ES: Combina todos los pares Q→A en un único array plano.
-// EN: Merges all Q→A pairs into a single flat array.
-const ALL_ITEMS = [
-  ...GENERAL_KNOWLEDGE.map((e) => ({ q: e.q, a: e.a, topic: e.topic  })),
-  ...SCHOOL_KNOWLEDGE .map((e) => ({ q: e.q, a: e.a, topic: e.subject})),
-];
+// ── Síntesis inteligente: Groq (preferido) o Gemini como fallback ───────────
+// Groq usa API compatible con OpenAI — sin instalar paquetes extra
+const GEMINI_MODEL = (process.env.GEMINI_SYNTHESIS_MODEL || "gemini-2.0-flash").trim();
+let _geminiClient = null;
+function getGemini() {
+  const key = (process.env.GEMINI_API_KEY || "").trim();
+  if (!key) return null;
+  if (!_geminiClient) _geminiClient = new GoogleGenAI({ apiKey: key });
+  return _geminiClient;
+}
+
+async function askGroq(prompt) {
+  const key = (process.env.GROQ_API_KEY || "").trim();
+  if (!key) return null;
+  const model = (process.env.GROQ_MODEL || "llama-3.3-70b-versatile").trim();
+  const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 220,
+      temperature: 0.7,
+    }),
+  });
+  if (!res.ok) throw new Error(`Groq ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content?.trim() || null;
+}
+
+async function askAI(prompt) {
+  // Intentar Groq primero (más rápido y sin restricciones de cuenta)
+  try {
+    const answer = await askGroq(prompt);
+    if (answer && answer.length > 20) return answer;
+  } catch (e) {
+    console.warn("[TF Chat] Groq falló:", e.message);
+  }
+  // Fallback a Gemini si Groq no está disponible
+  const gemini = getGemini();
+  if (!gemini) return null;
+  try {
+    const result = await gemini.models.generateContent({
+      model: GEMINI_MODEL,
+      contents: [{ role: "user", parts: [{ text: prompt }] }],
+    });
+    const raw = result.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    return raw.trim().length > 20 ? raw.trim() : null;
+  } catch (e) {
+    console.warn("[TF Chat] Gemini falló:", e.message);
+    return null;
+  }
+}
+
+// ── Aprendizaje persistente ───────────────────────────────────────────────
+const __dir = path.dirname(fileURLToPath(import.meta.url));
+const LEARNED_FILE = path.resolve(__dir, "../../data/learned-knowledge.json");
+
+function loadLearned() {
+  try {
+    if (fs.existsSync(LEARNED_FILE)) return JSON.parse(fs.readFileSync(LEARNED_FILE, "utf8"));
+  } catch { /* archivo corrupto, empezar vacío */ }
+  return [];
+}
+
+function saveLearned(entries) {
+  try {
+    fs.mkdirSync(path.dirname(LEARNED_FILE), { recursive: true });
+    fs.writeFileSync(LEARNED_FILE, JSON.stringify(entries, null, 2), "utf8");
+  } catch (e) {
+    console.warn("[TF Chat] No se pudo guardar aprendizaje:", e.message);
+  }
+}
+
+let learnedItems = loadLearned();
+
+function learnFromAnswer(question, answer) {
+  const normQ = question.toLowerCase().trim().slice(0, 120);
+  const exists = learnedItems.some((e) => e.q.toLowerCase().trim().slice(0, 120) === normQ);
+  if (exists) return;
+  learnedItems.push({ q: question, a: answer, topic: "learned", learned: true });
+  saveLearned(learnedItems);
+  // Invalidar índice para reconstruir con el nuevo conocimiento
+  kbTensor = null;
+  vocabulary = [];
+  idfArray = [];
+}
+
+// ── Corpus (KB fija + lo aprendido dinámicamente) ────────────────────────
+function buildCorpus() {
+  return [
+    ...GENERAL_KNOWLEDGE.map((e) => ({ q: e.q, a: e.a, topic: e.topic   })),
+    ...SCHOOL_KNOWLEDGE .map((e) => ({ q: e.q, a: e.a, topic: e.subject })),
+    ...learnedItems      .map((e) => ({ q: e.q, a: e.a, topic: "learned" })),
+  ];
+}
+
+let ALL_ITEMS = buildCorpus();
 
 // ── Normalización de texto / Text normalisation ────────────────────────────
 // ES: Elimina tildes, signos de puntuación y convierte a minúsculas.
@@ -106,8 +201,9 @@ let idfArray    = [];
 let kbTensor    = null;
 
 function buildIndex() {
-  if (kbTensor) return;                       // ES: ya construido / EN: already built
+  if (kbTensor) return;
 
+  ALL_ITEMS = buildCorpus(); // refrescar corpus con lo aprendido
   const N = ALL_ITEMS.length;
 
   // ES: Calcular frecuencia de documento (DF) para cada token.
@@ -160,7 +256,7 @@ function vectorise(text) {
 // EN: Returns the K Q→A pairs most similar to the query.
 //     Cosine similarity computed with tf.matMul.
 const MATCH_THRESHOLD = 0.18;   // ES: similitud mínima aceptable / EN: minimum acceptable similarity
-const HIGH_CONFIDENCE  = 0.32;  // ES: umbral de alta confianza; por encima no se necesita web / EN: high-confidence threshold; above this no web search needed
+const HIGH_CONFIDENCE  = 0.22;  // ES: umbral de alta confianza; Gemini cubre el resto / EN: high-confidence threshold; Gemini covers the rest
 
 // ES: Caché de últimas N respuestas por conversación para evitar repeticiones.
 //     Clave: conversationId (o userId si no hay conversación). Valor: array circular.
@@ -572,13 +668,15 @@ async function tfChat({ text, mode = "teacher", history = [], conversationId = n
   // ── 2. Búsqueda semántica TF.js / TF.js semantic search ───────────────
   const matches = findMatches(effectiveText, 3);
   const bestScore = matches.length > 0 ? matches[0].score : 0;
-
+  // Si la consulta contiene pocos tokens conocidos, no confiar en TF-IDF
+  const queryTokenCount = tokenise(effectiveText).filter((t) => vocabulary.includes(t)).length;
+  const trustTFIDF = queryTokenCount >= 2;
   // ── 3a. Alta confianza → responder desde la base de conocimientos ──────
   // ES: Si el índice TF-IDF tiene mucha confianza en la respuesta,
   //     la devuelve directamente sin necesitar internet.
   // EN: If the TF-IDF index has high confidence in the answer,
   //     return it directly without needing the internet.
-  if (bestScore >= HIGH_CONFIDENCE) {
+  if (trustTFIDF && bestScore >= HIGH_CONFIDENCE) {
     // ES: Si la mejor respuesta fue usada recientemente, intentar la siguiente
     // EN: If the best answer was used recently, try the next one
     let chosenMatch = matches[0];
@@ -612,21 +710,38 @@ async function tfChat({ text, mode = "teacher", history = [], conversationId = n
     // EN: If the search fails, continue with what we have.
   }
 
-  const webSynthesis = synthesizeFromWeb(searchQuery, webRaw);
+  // ── Síntesis inteligente (Groq / Gemini) si hay resultados web ──────────
+  let webSynthesis = null;
+  if (webRaw) {
+    const prompt = `Eres GaIA, una IA educativa en español para niños y jóvenes.\nResponde la siguiente pregunta de forma clara, amena y educativa (máximo 3 frases).\nUsa esta información de referencia si es útil:\n${webRaw.slice(0, 1800)}\n\nPregunta: ${effectiveText}`;
+    webSynthesis = await askAI(prompt).catch(() => null);
+    if (!webSynthesis) webSynthesis = synthesizeFromWeb(searchQuery, webRaw);
+  }
 
   if (webSynthesis) {
-    let combinedAnswer = webSynthesis;
-    if (bestScore >= MATCH_THRESHOLD && matches[0]?.item.a && !wasRecentlyUsed(convKey, matches[0].item.a)) {
-      combinedAnswer = `${matches[0].item.a} ${webSynthesis}`;
-    }
-    const finalAnswer = wrapWithMode(combinedAnswer, mode);
+    const finalAnswer = wrapWithMode(webSynthesis, mode);
     recordAnswer(convKey, webSynthesis);
+    // Aprender: guardar esta Q→A en la KB local para el futuro
+    learnFromAnswer(effectiveText, webSynthesis);
     return { answer: finalAnswer, webSearchUsed: true };
   }
 
-  // ── 4. Fallback: KB con score medio o "no encontré" ───────────────────
-  if (matches.length > 0 && bestScore >= MATCH_THRESHOLD) {
-    // Rotar respuestas del fallback también
+  // ── 4. IA directa si la web falló (Groq / Gemini) ───────────────────────
+  try {
+    const prompt = `Eres GaIA, una IA educativa en español para niños y jóvenes.\nResponde esta pregunta de forma clara, amena y educativa en máximo 3 frases cortas: ${effectiveText}`;
+    const aiAnswer = await askAI(prompt);
+    if (aiAnswer) {
+      const finalAnswer = wrapWithMode(aiAnswer, mode);
+      recordAnswer(convKey, aiAnswer);
+      learnFromAnswer(effectiveText, aiAnswer);
+      return { answer: finalAnswer, webSearchUsed: false };
+    }
+  } catch (e) {
+    console.warn("[TF Chat] IA directa falló:", e.message);
+  }
+
+  // ── 5. Fallback: KB con score medio o "no encontré" ───────────────────
+  if (trustTFIDF && matches.length > 0 && bestScore >= MATCH_THRESHOLD) {
     const fallback = matches.find((m) => !wasRecentlyUsed(convKey, m.item.a)) ?? matches[0];
     const finalAnswer = wrapWithMode(fallback.item.a, mode);
     recordAnswer(convKey, fallback.item.a);
