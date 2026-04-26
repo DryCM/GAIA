@@ -92,4 +92,134 @@ async function chatWithOllama({ messages }) {
   return data?.message?.content?.trim() || "No pude responder ahora mismo.";
 }
 
-export { getAIProvider, getGeminiClient, chatWithOllama };
+// ES: Envía mensajes a Ollama en modo streaming y llama onToken con cada fragmento.
+//     Devuelve el texto completo acumulado al terminar.
+// EN: Sends messages to Ollama in streaming mode and calls onToken with each fragment.
+//     Returns the full accumulated text when finished.
+async function chatWithOllamaStream({ messages, onToken }) {
+  const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: ollamaChatModel, messages, stream: true }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    const error = new Error(`Ollama streaming fallo (${response.status}): ${body || "sin detalle"}`);
+    error.statusCode = 502;
+    throw error;
+  }
+
+  const reader  = response.body.getReader();
+  const decoder = new TextDecoder();
+  let fullText  = "";
+  let buffer    = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const data  = JSON.parse(line);
+        const token = data?.message?.content ?? "";
+        if (token) { fullText += token; onToken(token); }
+      } catch { /* saltar línea malformada / skip malformed line */ }
+    }
+  }
+
+  // ES: Procesar cualquier fragmento pendiente en el buffer
+  // EN: Process any pending fragment left in the buffer
+  if (buffer.trim()) {
+    try {
+      const data  = JSON.parse(buffer);
+      const token = data?.message?.content ?? "";
+      if (token) { fullText += token; onToken(token); }
+    } catch {}
+  }
+
+  return fullText || "No pude responder ahora mismo.";
+}
+
+// ES: Envía mensajes a Gemini en modo streaming y llama onToken con cada fragmento.
+//     Devuelve el texto completo acumulado al terminar.
+// EN: Sends messages to Gemini in streaming mode and calls onToken with each fragment.
+//     Returns the full accumulated text when finished.
+async function chatWithGeminiStream({ ai, model, contents, config, onToken }) {
+  const stream = await ai.models.generateContentStream({ model, contents, config });
+  let fullText = "";
+  for await (const chunk of stream) {
+    const token = chunk.text ?? "";
+    if (token) { fullText += token; onToken(token); }
+  }
+  return fullText || "No pude responder ahora mismo.";
+}
+
+// ES: Modelo Ollama con capacidad de visión (configurable via OLLAMA_VISION_MODEL).
+// EN: Ollama model with vision capability (configurable via OLLAMA_VISION_MODEL).
+const ollamaVisionModel = (process.env.OLLAMA_VISION_MODEL || "").trim() || ollamaChatModel;
+
+// ES: Envía una imagen al proveedor de IA activo y devuelve la descripción.
+//     - Gemini: usa inlineData con base64.
+//     - Ollama: usa el campo images del endpoint /api/chat.
+//     - TensorFlow: no soporta visión, lanza 501.
+// EN: Sends an image to the active AI provider and returns a description.
+//     - Gemini: uses inlineData with base64.
+//     - Ollama: uses the images field of /api/chat endpoint.
+//     - TensorFlow: vision not supported, throws 501.
+async function analyzeImageWithAI({ imageBuffer, mimeType, question, systemInstruction }) {
+  const provider = getAIProvider();
+
+  if (provider === "gemini") {
+    const ai = getGeminiClient();
+    const geminiModel = (process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
+    const result = await ai.models.generateContent({
+      model: geminiModel,
+      contents: [
+        {
+          parts: [
+            { inlineData: { mimeType, data: imageBuffer.toString("base64") } },
+            { text: question },
+          ],
+        },
+      ],
+      config: { systemInstruction },
+    });
+    return result.text?.trim() || "No pude analizar la imagen.";
+  }
+
+  if (provider === "ollama") {
+    const response = await fetch(`${ollamaBaseUrl}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: ollamaVisionModel,
+        messages: [
+          { role: "system", content: systemInstruction },
+          { role: "user", content: question, images: [imageBuffer.toString("base64")] },
+        ],
+        stream: false,
+      }),
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      const err = new Error(`Ollama vision fallo (${response.status}): ${body || "sin detalle"}`);
+      err.statusCode = 502;
+      throw err;
+    }
+    const data = await response.json();
+    return data?.message?.content?.trim() || "No pude analizar la imagen.";
+  }
+
+  // tensorflow: sin soporte de visión
+  const err = new Error(
+    "El proveedor actual no soporta análisis de imágenes. Activa Gemini o un modelo Ollama con visión (llava)."
+  );
+  err.statusCode = 501;
+  throw err;
+}
+
+export { getAIProvider, getGeminiClient, chatWithOllama, chatWithOllamaStream, chatWithGeminiStream, analyzeImageWithAI };

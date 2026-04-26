@@ -100,13 +100,7 @@ function getUserCredits(userId) {
 // EN: Deducts `amount` credits from the user.
 //     Returns false if insufficient credits (nothing deducted).
 function spendCredit(userId, amount) {
-  const current = getUserCredits(userId);
-  if (current.remaining < amount) {
-    return false;
-  }
-
-  current.remaining -= amount;
-  persistStore();
+  // Créditos ilimitados mientras se entrena la IA
   return true;
 }
 

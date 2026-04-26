@@ -1,25 +1,39 @@
 import { Router } from "express";
 import {
   createChatResponse,
+  createChatResponseStream,
   generateImage,
   generateVideo,
   transcribeAudio,
+  analyzeDocument,
   getFactOfTheDay,
   getKnowledgeInfo,
   getChatHistory,
   getChatConversation,
   deleteChatHistory,
   deleteChatConversation,
+  getSpontaneousMessage,
+  generateQuiz,
 } from "../controllers/aiController.js";
 import { upload } from "../middleware/uploadMiddleware.js";
 
 const router = Router();
 
 // ES: Endpoints de chat y multimedia / EN: Chat and media endpoints
-router.post("/transcribe",  upload.single("file"), transcribeAudio);
-router.post("/chat",        createChatResponse);
-router.post("/images",      generateImage);
-router.post("/videos",      generateVideo);
+router.post("/transcribe",        upload.single("file"), transcribeAudio);
+router.post("/chat",              createChatResponse);
+router.post("/chat/stream",       createChatResponseStream);
+router.post("/images",            generateImage);
+router.post("/videos",            generateVideo);
+router.post("/analyze-document",  upload.single("file"), analyzeDocument);
+
+// ES: Mensaje espontáneo del modo amigo (sin crédito, sin autenticación requerida)
+// EN: Spontaneous message for friend mode (no credit, no auth required)
+router.get("/spontaneous",  getSpontaneousMessage);
+
+// ES: Quiz basado en conversación reciente
+// EN: Quiz based on recent conversation
+router.post("/chat/quiz", generateQuiz);
 
 // ES: Endpoints de conocimiento / EN: Knowledge endpoints
 router.get("/knowledge/fact",   getFactOfTheDay);

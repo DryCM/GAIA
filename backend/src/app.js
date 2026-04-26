@@ -18,10 +18,14 @@ import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { jsonErrorHandler } from "./middleware/jsonErrorHandler.js";
 import { requestContext } from "./middleware/requestContext.js";
 import aiRoutes from "./routes/aiRoutes.js";
+import authRoutes from "./routes/authRoutes.js";
 import creditsRoutes from "./routes/creditsRoutes.js";
+import gamificationRoutes from "./routes/gamificationRoutes.js";
 import metaRoutes from "./routes/metaRoutes.js";
 import systemRoutes from "./routes/systemRoutes.js";
 import learningRoutes from "./routes/learningRoutes.js";
+import vocabularyRoutes from "./routes/vocabularyRoutes.js";
+import { optionalAuth } from "./middleware/authMiddleware.js";
 
 const app = express();
 const backendSrcDir = path.dirname(fileURLToPath(import.meta.url));
@@ -45,18 +49,25 @@ app.use(requestContext);
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(jsonErrorHandler);
+app.use(optionalAuth);
 
 // ES: Montar rutas de la API en /api y /api/v1 (retrocompatibilidad)
 // EN: Mount API routes at /api and /api/v1 (backwards compatibility)
 app.use(systemRoutes);
+app.use("/api", authRoutes);
+app.use("/api/v1", authRoutes);
 app.use("/api", metaRoutes);
 app.use("/api", creditsRoutes);
 app.use("/api", aiRoutes);
 app.use("/api", learningRoutes);
+app.use("/api", gamificationRoutes);
+app.use("/api", vocabularyRoutes);
 app.use("/api/v1", metaRoutes);
 app.use("/api/v1", creditsRoutes);
 app.use("/api/v1", aiRoutes);
 app.use("/api/v1", learningRoutes);
+app.use("/api/v1", gamificationRoutes);
+app.use("/api/v1", vocabularyRoutes);
 
 if (hasMascotAssets) {
 	app.use("/assets/mascots", express.static(mascotAssetsDir));

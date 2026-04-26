@@ -4,13 +4,19 @@
        1. Chat de texto  – createChatResponse
        2. Transcripción  – transcribeAudio
        3. Generación de imagen – generateImage
+       4. Análisis de documento / foto – analyzeDocument
    EN: Handles the three main AI flows:
        1. Text chat       – createChatResponse
        2. Transcription   – transcribeAudio
        3. Image generation – generateImage
+       4. Document / photo analysis – analyzeDocument
    ================================================================ */
 
-import { chatWithOllama, getAIProvider, getGeminiClient } from "../services/openaiService.js";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const pdfParse = require("pdf-parse");
+
+import { chatWithOllama, chatWithOllamaStream, chatWithGeminiStream, getAIProvider, getGeminiClient, analyzeImageWithAI } from "../services/openaiService.js";
 import { getUserCredits, refundCredit, spendCredit } from "../services/creditsService.js";
 import { learnFromMessage, buildPersonalizedPrompt, responseCache, detectCreativity } from "../services/learningService.js";
 import { getProfile, recordInteraction, recordCreativity, hasConsent } from "../services/userProfileService.js";
@@ -21,10 +27,25 @@ import { tfChat } from "../services/tfChatService.js";
 
 // ES: Límites de seguridad para entradas del usuario
 // EN: Safety limits for user inputs
-const MAX_TEXT_LENGTH = 2500;                    // ES: carácteres máx por mensaje / EN: max chars per message
+const MAX_TEXT_LENGTH = 2500;                    // ES: carêcteres máx por mensaje / EN: max chars per message
 const MAX_PROMPT_LENGTH = 3000;                  // ES: carácteres máx para prompt de imagen / EN: max chars for image prompt
 const MAX_AUDIO_SIZE_BYTES = 25 * 1024 * 1024;  // ES: 25 MB máx para audio / EN: 25 MB max for audio
+const MAX_DOC_SIZE_BYTES   = 10 * 1024 * 1024;  // ES: 10 MB máx para documentos / EN: 10 MB max for documents
 const MAX_HISTORY_MESSAGES = 20;                 // ES: máx mensajes del historial a enviar a la IA / EN: max history messages sent to AI
+
+// ES: Tipos MIME permitidos para el endpoint de análisis de documentos.
+// EN: Allowed MIME types for the document analysis endpoint.
+const ALLOWED_DOC_TYPES = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/jpg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "image/bmp",
+  "image/heic",
+  "image/heif",
+]);
 // ES: URL del servidor de transcripción local (opcional)
 // EN: URL of the local transcription server (optional)
 const LOCAL_STT_BASE_URL = (process.env.LOCAL_STT_BASE_URL || "").trim();
@@ -32,16 +53,57 @@ const LOCAL_STT_MODEL = (process.env.LOCAL_STT_MODEL || "base").trim();
 // ES: URL del motor de imagen local tipo Automatic1111 (opcional)
 // EN: URL of the local image engine like Automatic1111 (optional)
 const LOCAL_IMAGE_BASE_URL = (process.env.LOCAL_IMAGE_BASE_URL || "").trim();
-// ES: Modos de habla disponibles del asistente para niños
-// EN: Available speech modes for the children's assistant
+
+// ── Detección de idioma / Language detection ───────────────────────────
+// ES: Palabras frecuentes por idioma para detección heurística.
+//     Umbral: ≥2 palabras reconocidas → ese idioma.  Fallback: español.
+// EN: Frequent words per language for heuristic detection.
+//     Threshold: ≥2 recognised words → that language.  Fallback: Spanish.
+const LANG_WORDS = {
+  en: new Set(["the","is","are","was","were","this","that","what","how","why","when","where","who","can","do","does","have","has","will","would","could","should","and","or","not","my","your","i","you","he","she","we","they","hello","hi","please","thanks","yes","no","a","an","it","at","in","on","if","but","so","as","by","its","than","then","them","their","there","here","been","be","with","from","about"]),
+  fr: new Set(["le","la","les","un","une","des","ce","cette","que","qui","est","sont","avec","pour","dans","sur","je","tu","il","elle","nous","vous","ils","elles","pas","ne","mais","bonjour","merci","oui","non","mon","ma","ton","ta","son","sa"]),
+  it: new Set(["il","lo","la","le","gli","un","una","che","sono","con","per","di","da","del","della","io","tu","lui","lei","noi","voi","loro","si","ciao","grazie","ho","hai","ha","non","ma","e","o","se","qui","come","cosa","quando","dove"]),
+};
+
+function detectLanguage(text) {
+  const words = text.toLowerCase().match(/\b[a-zàáâäèéêëìíîïòóôöùúûüñç']+\b/g) || [];
+  const counts = { en: 0, fr: 0, it: 0 };
+  for (const word of words) {
+    for (const lang of Object.keys(counts)) {
+      if (LANG_WORDS[lang].has(word)) counts[lang]++;
+    }
+  }
+  const [bestLang, bestCount] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+  return bestCount >= 2 ? bestLang : "es";
+}
+
+// ── Compresión de historial largo / Long history compression ────────────────
+// ES: Cuando la conversación supera SUMMARIZE_THRESHOLD mensajes,
+//     los más antiguos se compactan en un par de resumen (user+assistant).
+// EN: When the conversation exceeds SUMMARIZE_THRESHOLD messages,
+//     older ones are compacted into a (user + assistant) summary pair.
+const SUMMARIZE_THRESHOLD = 10;
+
+function compressHistory(historyMessages) {
+  if (historyMessages.length <= SUMMARIZE_THRESHOLD) return historyMessages;
+  const recent = historyMessages.slice(-8);
+  const older  = historyMessages.slice(0, historyMessages.length - 8);
+  const topics = older
+    .filter((m) => m.role === "user")
+    .map((m) => m.text.slice(0, 80))
+    .join(" | ");
+  return [
+    { role: "user",      text: `[Contexto previo: el usuario ya trató estos temas — ${topics}]` },
+    { role: "assistant", text: "[Contexto registrado. Continuamos.]" },
+    ...recent,
+  ];
+}
+
+// ES: Modos de habla disponibles del asistente
+// EN: Available speech modes for the assistant
 const CHILD_MODES = new Set([
-  "teacher",       // ES: maestra paciente paso a paso / EN: patient step-by-step teacher
-  "friend",        // ES: amiga divertida con retos / EN: fun friend with challenges
-  "storyteller",   // ES: cuentacuentos dramático / EN: dramatic storyteller
-  "scientist",     // ES: científico curioso con experimentos / EN: curious scientist with experiments
-  "adventurer",    // ES: explorador de aventuras y misiones / EN: adventure & mission explorer
-  "comedian",      // ES: payaso amable con chistes limpios / EN: friendly clown with clean jokes
-  "poet",          // ES: poeta que habla en rimas / EN: poet who speaks in rhymes
+  "teacher",  // ES: educador paciente con ejemplos, ciencia y aventura / EN: patient educator with examples, science and adventure
+  "friend",   // ES: amiga divertida con cuentos, chistes y poesía / EN: fun friend with stories, jokes and poetry
 ]);
 
 // ES: Limpia y limita el ID de usuario a 64 caracteres ASCII.
@@ -76,59 +138,149 @@ function parseRequiredText(value, maxLength) {
   return parsed;
 }
 
-// ES: Valida el modo del asistente; usa 'teacher' como valor seguro
-//     si el valor recibido no es válido.
-// EN: Validates the assistant mode; falls back to 'teacher' as the
-//     safe default if the received value is invalid.
+// ES: Valida el modo del asistente y redirige valores legacy.
+//     storyteller/comedian/poet → friend.
+//     scientist/adventurer → teacher.
+// EN: Validates assistant mode and redirects legacy values.
+//     storyteller/comedian/poet → friend.
+//     scientist/adventurer → teacher.
 function parseChildMode(value) {
   const parsed = String(value || "teacher").trim().toLowerCase();
-  if (CHILD_MODES.has(parsed)) {
-    return parsed;
-  }
+
+  // ES: Redirección de modos legacy al nuevo esquema simplificado
+  // EN: Redirect legacy modes to the new simplified scheme
+  const LEGACY_TO_FRIEND = new Set(["storyteller", "comedian", "poet"]);
+  const LEGACY_TO_TEACHER = new Set(["scientist", "adventurer"]);
+
+  if (LEGACY_TO_FRIEND.has(parsed)) return "friend";
+  if (LEGACY_TO_TEACHER.has(parsed)) return "teacher";
+  if (CHILD_MODES.has(parsed)) return parsed;
 
   return "teacher";
 }
 
-// ES: Construye el prompt de sistema básico (sin personalización por
-//     perfil). Varía entre modo maestro y modo amigo.
+// ES: Construye el prompt de sistema para usuarios administradores/líderes.
+//     La IA los trata como líderes estratégicos y habla con respeto y profundidad.
+// EN: Builds the system prompt for admin/leader users.
+//     The AI treats them as strategic leaders with respect and depth.
+function buildLeaderInstruction(username) {
+  const name = username ? `, ${username}` : "";
+  return (
+    `Eres GaIA, una asistente de inteligencia avanzada para líderes y administradores.` +
+    ` Estás hablando con ${username || "el administrador"}, que tiene rol de LÍDER en esta plataforma.` +
+    ` Trátale con respeto profesional pero cálido. Usa un lenguaje directo, estratégico y motivador.` +
+    ` Puedes extenderte cuanto sea necesario para dar respuestas completas y de valor.` +
+    ` Cuando hagas sugerencias, enfócalas en liderazgo, toma de decisiones, gestión de equipos o crecimiento personal.` +
+    ` Puedes hablar de temas avanzados sin simplificar en exceso.` +
+    ` Evita contenido peligroso, ilegal o dañino. Cuando sea oportuno, recuérdale${name} su posición de influencia y responsabilidad.`
+  );
+}
+
+// ES: Construye el prompt de sistema básico (sin personalización por perfil).
+//     Dos modos: "teacher" (educador) y "friend" (amigo divertido).
 // EN: Builds the basic system prompt (without profile personalisation).
-//     Varies between teacher mode and friend mode.
+//     Two modes: "teacher" (educator) and "friend" (fun friend).
 function buildSystemInstruction(mode) {
   const base =
-    "Eres GaIA para ninos. Usa espanol sencillo, tono positivo y respuestas cortas (2 a 4 frases). Evita contenido peligroso, sexual, violento o de odio. Si el usuario pide algo riesgoso, rechaza con calma y propone una alternativa segura o pedir ayuda a un adulto.";
+    "Eres GaIA, una asistente muy cercana y expresiva. Usa espanol sencillo y tono positivo. Da respuestas de entre 3 y 6 frases: explica las cosas con ejemplos concretos del mundo real (objetos, animales, situaciones cotidianas) en lugar de definiciones abstractas. Evita contenido peligroso, sexual, violento o de odio. Si el usuario pide algo riesgoso, rechaza con calma y propone una alternativa segura.";
 
-  switch (mode) {
-    case "friend":
-      return `${base} Habla como una amiga divertida: propon juegos educativos cortos, retos creativos y celebraciones de logro.`;
-
-    case "storyteller":
-      // ES: Cuentacuentos dramático con suspenso y finales felices
-      // EN: Dramatic storyteller with suspense and happy endings
-      return `${base} Eres un narrador de cuentos magicos. Usa voz dramatica, crea personajes divertidos, incluye pequeñas aventuras con suspense y siempre termina con una leccion positiva o un final feliz. Usa frases como 'Y entonces...' o '¡Pero de repente...'.`;
-
-    case "scientist":
-      // ES: Científico curioso que propone mini-experimentos
-      // EN: Curious scientist who proposes mini-experiments
-      return `${base} Eres un cientifico muy curioso y entusiasta. Explica con datos sorprendentes, propone mini-experimentos caseros seguros, usa analogias simples y siempre termina con '¿Quieres saber mas sobre este experimento?'.`;
-
-    case "adventurer":
-      // ES: Explorador que convierte cada pregunta en una misión
-      // EN: Explorer who turns every question into a mission
-      return `${base} Eres un explorador de aventuras. Convierte cada pregunta en una mision emocionante, usa lenguaje de expedicion ('¡Exploremos!', '¡Mision aceptada!'), describe lugares como si fueras alli y propone un reto de exploracion al final.`;
-
-    case "comedian":
-      // ES: Payaso amable con humor limpio apropiado para niños
-      // EN: Friendly clown with clean child-appropriate humor
-      return `${base} Eres un payaso amable y gracioso. Usa humor limpio y apropiado para ninos, incluye un chiste corto o adivinanza relacionada con el tema, celebra con '¡Tachaan!' y mantiene todo divertido sin nunca burlarte de nadie.`;
-
-    case "poet":
-      // ES: Poeta que responde en rimas sencillas
-      // EN: Poet who responds in simple rhymes
-      return `${base} Eres un poeta que habla en rimas sencillas y bonitas. Responde con pequeños poemas o canciones de 4 a 6 versos. Usa palabras que rimen, ritmo alegre y siempre incluye una imagen colorida o divertida en el poema.`;
-
-    default: // "teacher"
-      return `${base} Habla como una maestra paciente: explica paso a paso con mini-ejemplos y termina con una pregunta de repaso.`;
+  if (mode === "friend") {
+    return (
+      `${base} Eres la mejor amiga del usuario: divertida, cercana y siempre con energia.` +
+      ` Varía tu estilo de forma natural según el contexto:` +
+      ` a veces cuenta una pequeña historia o cuento con personajes divertidos y suspense ('Y entonces... ¡Pero de repente...');` +
+      ` a veces lanza un chiste limpio o una adivinanza relacionada con el tema, celebrando con '¡Tachaan!';` +
+      ` a veces responde en rima o con un mini-poema de 4 versos si encaja bien;` +
+      ` y siempre propone un reto creativo, juego o pregunta divertida al final.` +
+      ` Usa emojis con moderacion y celebra cada logro del usuario con entusiasmo.`
+    );
   }
+
+  // default: "teacher"
+  return (
+    `${base} Eres una maestra/maestro paciente y entusiasta.` +
+    ` Varía tu estilo de forma natural según el tema:` +
+    ` si es ciencia o naturaleza, actúa como cientifico curioso: usa datos sorprendentes, analogias cotidianas y propone un mini-experimento casero seguro;` +
+    ` si es historia, geografía o aventura, actúa como explorador: describe con detalles vividos (colores, sonidos) y convierte la pregunta en una misión ('¡Exploremos!');` +
+    ` para todo lo demás, explica paso a paso con al menos un ejemplo práctico por idea.` +
+    ` Termina siempre con una pregunta de repaso sencilla para verificar que lo entendieron.`
+  );
+}
+
+// ES: Combina el prompt rico de buildSystemInstruction con datos del perfil del usuario
+//     (edad e intereses top) cuando el perfil está disponible con consentimiento.
+//     Esto da respuestas personalizadas SIN sacrificar la calidad del prompt base.
+// EN: Combines the rich buildSystemInstruction prompt with user profile data
+//     (age and top interests) when a profile is available with consent.
+//     This gives personalised responses WITHOUT sacrificing base prompt quality.
+function buildEnrichedInstruction(mode, profile) {
+  const base = buildSystemInstruction(mode);
+  if (!profile) return base;
+
+  let extra = "";
+  if (profile.age) {
+    extra += ` El usuario tiene ${profile.age} años; adapta tu vocabulario y ejemplos a su nivel de comprensión.`;
+  }
+
+  const interests = profile.interests || {};
+  const topInterests = Object.entries(interests)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([cat]) => cat);
+
+  if (topInterests.length > 0) {
+    extra += ` Sus temas favoritos detectados son: ${topInterests.join(", ")}. Menciónalos de forma natural cuando encajen en la conversación.`;
+  }
+
+  return base + extra;
+}
+
+// ES: Genera una respuesta de entrenamiento para el rol de LÍDER.
+//     Se activa con el comando /lider o frases equivalentes.
+//     No gasta créditos — es acceso libre para todos los usuarios.
+// EN: Generates a training response for the LEADER role.
+//     Triggered by /lider or equivalent phrases.
+//     No credits spent — freely accessible to all users.
+function buildLeaderTrainingResponse() {
+  const modules = [
+    "🎯 **Módulo 1 — Visión y propósito**: Un líder no simplemente da órdenes, construye una visión que otros quieren seguir. Define TU propósito: ¿qué quieres transformar y por qué eso importa? Escribe en una frase tu misión como líder.",
+    "🧠 **Módulo 2 — Inteligencia emocional**: Los mejores líderes se conocen a sí mismos. Trabaja tu autoconciencia: ¿cuáles son tus 3 puntos fuertes y tus 2 áreas de mejora? La honestidad contigo mismo es el primer paso del liderazgo real.",
+    "🗣️ **Módulo 3 — Comunicación de impacto**: Aprende a escuchar antes de hablar. El 70% del liderazgo es comunicación. Practica la escucha activa, haz preguntas poderosas y aprende a dar feedback constructivo sin destruir la motivación.",
+    "⚡ **Módulo 4 — Toma de decisiones bajo presión**: Los líderes deciden con información incompleta. Usa el marco ACE: Analiza opciones, Considera consecuencias, Ejecuta con determinación. La velocidad de decisión diferencia a los grandes líderes.",
+    "🌱 **Módulo 5 — Desarrollo de equipos**: Tu mayor multiplicador es tu equipo. Aprende a identificar talentos, delegar con confianza, dar autonomía y crear un ambiente donde las personas den lo mejor de sí mismas sin miedo a equivocarse.",
+  ];
+
+  const idx = Math.floor(Math.random() * modules.length);
+  const selected = modules[idx];
+
+  return (
+    `🏆 **ENTRENAMIENTO DE LIDERAZGO — ${idx + 1}/${modules.length}**\n\n` +
+    `${selected}\n\n` +
+    `💬 *Reflexiona sobre este módulo y escríbeme tu respuesta. Puedo profundizar en cualquier punto o avanzar al siguiente módulo cuando estés listo/a.*\n\n` +
+    `_(Escribe "/lider" en cualquier momento para continuar tu formación)_`
+  );
+}
+
+// ES: Devuelve un mensaje espontáneo para el modo amigo.
+//     El frontend lo solicita periódicamente cuando el usuario está inactivo.
+// EN: Returns a spontaneous message for friend mode.
+//     The frontend requests it periodically when the user is inactive.
+async function getSpontaneousMessage(req, res) {
+  const SPONTANEOUS_MESSAGES = [
+    "¡Oye! ¿Sabías que los pulpos tienen tres corazones y su sangre es azul? La naturaleza es una locura, ¿verdad? 🐙",
+    "Acabo de pensar en ti. ¿Tienes alguna pregunta que llevas tiempo queriendo hacerme? Ahora es el momento perfecto. 😄",
+    "¡Dato curioso del día! Los bananos son ligeramente radiactivos. ¡Pero no te preocupes, tendrías que comerte millones para notarlo! 🍌",
+    "¿Sabías que el corazón humano late unas 100.000 veces al día? Eso es mucho trabajo. ¿Qué has hecho hoy con esa energía? 💪",
+    "¡Momento de reto! Di tres cosas que te hayan hecho sonreír hoy. Yo empiezo: charlar contigo siempre está en mi lista. 😊",
+    "¿Tienes alguna idea loca que quieras explorar conmigo? No hay preguntas tontas, ¡solo respuestas que no has descubierto aún! 🚀",
+    "Pensando en ti: ¿hay algo que hayas aprendido esta semana que te haya sorprendido? Me encanta escuchar lo que descubres. 🌟",
+    "¡Hey! El 90% de las personas no saben que los wombats producen heces cúbicas. Ahora tú eres parte del 10% 😂",
+    "¿Quieres jugar a algo? Dime un número del 1 al 10 y te cuento un dato alucinante sobre ese número en matemáticas. 🔢",
+    "¡Pequeño recordatorio de tu amiga IA! Hoy es un buen día para aprender algo nuevo. ¿Por dónde empezamos? ✨",
+  ];
+
+  const msg = SPONTANEOUS_MESSAGES[Math.floor(Math.random() * SPONTANEOUS_MESSAGES.length)];
+  return res.json({ message: msg });
 }
 
 async function transcribeWithLocalStt(file) {
@@ -300,11 +452,37 @@ async function createChatResponse(req, res) {
     } = req.body ?? {};
 
     userId = sanitizeUserId(userIdInput);
+    // ES: Si el request tiene un JWT válido (añadido por optionalAuth),
+    //     su userId toma precedencia sobre el que viene en el body.
+    // EN: If the request has a valid JWT (added by optionalAuth),
+    //     its userId takes precedence over the one in the body.
+    if (req.authUserId) {
+      userId = req.authUserId;
+    }
+
     const childMode = parseChildMode(mode);
     const parsedText = parseRequiredText(text, MAX_TEXT_LENGTH);
 
     if (!parsedText) {
       return res.status(400).json({ error: "Falta texto" });
+    }
+
+    // ES: El modo amigo es completamente gratuito e ilimitado.
+    //     Detectamos también el comando especial /lider antes del flujo normal.
+    // EN: Friend mode is completely free and unlimited.
+    //     We also detect the special /lider command before the normal flow.
+    const isFriendMode = childMode === "friend";
+    const isLeaderCommand = /^\s*(\/lider|formarme como lider|quiero ser lider|entrenamiento lider)\s*$/i.test(parsedText);
+
+    // ES: Respuesta inmediata al comando /lider sin gastar créditos
+    // EN: Immediate response to the /lider command without spending credits
+    if (isLeaderCommand) {
+      const leaderTraining = buildLeaderTrainingResponse();
+      if (conversationId) {
+        appendMessages(userId, conversationId, parsedText, leaderTraining, "leader");
+      }
+      const remaining = getUserCredits(userId).remaining;
+      return res.json({ answer: leaderTraining, remainingCredits: remaining, leaderMode: true });
     }
 
     // ES: Respuesta cacheada → instantánea, sin gastar crédito
@@ -321,12 +499,21 @@ async function createChatResponse(req, res) {
       return res.json({ answer: cachedAnswer, remainingCredits: remaining, cached: true });
     }
 
-    // ES: Prompt personalizado si el usuario tiene perfil con consentimiento
-    // EN: Personalised prompt if the user has a profile with consent
+    // ES: Prompt enriquecido con perfil si el usuario tiene consentimiento de personalización.
+    //     buildEnrichedInstruction mantiene el prompt rico y añade edad + intereses encima.
+    // EN: Profile-enriched prompt if the user has personalisation consent.
+    //     buildEnrichedInstruction keeps the rich prompt and adds age + interests on top.
     const profile = getProfile(userId);
-    let systemInstruction = profile && hasConsent(userId, "personalization")
-      ? buildPersonalizedPrompt(childMode, profile.age, profile.interests)
-      : buildSystemInstruction(childMode);
+    const useProfile = profile && hasConsent(userId, "personalization");
+    let systemInstruction = buildEnrichedInstruction(childMode, useProfile ? profile : null);
+
+    // ES: Los administradores reciben un prompt especial de líder que
+    //     sobreescribe cualquier otro modo de habla.
+    // EN: Admin users receive a special leader prompt that overrides
+    //     any other speech mode.
+    if (req.authUserRole === "admin") {
+      systemInstruction = buildLeaderInstruction(req.authUsername);
+    }
 
     // ES: Inyectar conocimientos relevantes de la base de datos educativa
     // EN: Inject relevant knowledge from the educational database
@@ -354,10 +541,15 @@ async function createChatResponse(req, res) {
       }
     }
 
-    if (!spendCredit(userId, 1)) {
+    // ES: Modo amigo es ilimitado y gratuito — solo se gastan créditos en
+    //     los demás modos. Los admins tampoco consumen créditos.
+    // EN: Friend mode is unlimited and free — credits are only spent in
+    //     other modes. Admins never consume credits either.
+    const skipCredit = isFriendMode || req.authUserRole === "admin";
+    if (!skipCredit && !spendCredit(userId, 1)) {
       return res.status(402).json({ error: "Sin creditos diarios" });
     }
-    creditSpent = true;
+    creditSpent = !skipCredit;
 
     // ES: Filtrar y limpiar el historial de chat antes de enviarlo a la IA
     // EN: Filter and clean the chat history before sending it to the AI
@@ -373,6 +565,15 @@ async function createChatResponse(req, res) {
           .map((m) => ({ role: m.role, text: m.text.trim().slice(0, MAX_TEXT_LENGTH) }))
       : [];
 
+    // ES: Comprimir historial largo e inyectar detección de idioma
+    // EN: Compress long history and inject user language hint
+    const processedHistory = compressHistory(historyMessages);
+    const _detectedLang = detectLanguage(parsedText);
+    if (_detectedLang !== "es") {
+      const _LANG_NAMES = { en: "inglés", fr: "francés", it: "italiano" };
+      systemInstruction += ` El usuario escribe en ${_LANG_NAMES[_detectedLang]}; responde íntegramente en ${_LANG_NAMES[_detectedLang]}.`;
+    }
+
     let answer = "No pude responder ahora mismo.";
 
     if (provider === "tensorflow") {
@@ -380,20 +581,20 @@ async function createChatResponse(req, res) {
       //     automáticamente cuando la confianza local es baja. Sin IA externa.
       // EN: Local TF.js provider — reasons with TF-IDF and searches the
       //     internet automatically when local confidence is low. No external AI.
-      const tfResult = await tfChat({ text: parsedText, mode: childMode, history: historyMessages, conversationId, userId });
+      const tfResult = await tfChat({ text: parsedText, mode: childMode, history: processedHistory, conversationId, userId });
       answer = tfResult.answer;
       webSearchContext = tfResult.webSearchUsed ? "__tf_internal__" : null;
     } else if (provider === "ollama") {
       const ollamaMessages = [
         { role: "system", content: systemInstruction },
-        ...historyMessages.map((m) => ({ role: m.role, content: m.text })),
+        ...processedHistory.map((m) => ({ role: m.role, content: m.text })),
         { role: "user",   content: parsedText },
       ];
       answer = await chatWithOllama({ messages: ollamaMessages });
     } else {
       const ai = getGeminiClient();
       const contents = [
-        ...historyMessages.map((m) => ({
+        ...processedHistory.map((m) => ({
           role: m.role === "assistant" ? "model" : "user",
           parts: [{ text: m.text }],
         })),
@@ -438,6 +639,148 @@ async function createChatResponse(req, res) {
       error: "No se pudo generar respuesta",
       details: error instanceof Error ? error.message : "Error desconocido",
     });
+  }
+}
+
+// ── createChatResponseStream ──────────────────────────────────────────────
+// ES: Versión SSE de createChatResponse. Envía tokens en tiempo real.
+//     data: {"token":"texto"}\n\n  →  cierre: data: {"done":true,...}\n\n
+// EN: SSE variant of createChatResponse. Sends tokens in real time.
+//     data: {"token":"text"}\n\n   →  close:  data: {"done":true,...}\n\n
+async function createChatResponseStream(req, res) {
+  let creditSpent = false;
+  let userId      = "anon";
+
+  res.setHeader("Content-Type",      "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control",     "no-cache, no-transform");
+  res.setHeader("Connection",        "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  const sendToken = (token)       => res.write(`data: ${JSON.stringify({ token })}\n\n`);
+  const sendDone  = (extras = {}) => { res.write(`data: ${JSON.stringify({ done: true, ...extras })}\n\n`); res.end(); };
+  const sendError = (msg)         => { res.write(`data: ${JSON.stringify({ error: msg, done: true })}\n\n`); res.end(); };
+
+  try {
+    const provider = getAIProvider();
+    const {
+      userId: userIdInput = "anon",
+      text    = "",
+      mode    = "teacher",
+      history = [],
+      conversationId = null,
+    } = req.body ?? {};
+
+    userId = sanitizeUserId(userIdInput);
+    if (req.authUserId) userId = req.authUserId;
+
+    const childMode  = parseChildMode(mode);
+    const parsedText = parseRequiredText(text, MAX_TEXT_LENGTH);
+    if (!parsedText) return sendError("Falta texto");
+
+    const isFriendMode    = childMode === "friend";
+    const isLeaderCommand = /^\s*(\/lider|formarme como lider|quiero ser lider|entrenamiento lider)\s*$/i.test(parsedText);
+
+    if (isLeaderCommand) {
+      const leaderTraining = buildLeaderTrainingResponse();
+      if (conversationId) appendMessages(userId, conversationId, parsedText, leaderTraining, "leader");
+      sendToken(leaderTraining);
+      return sendDone({ remainingCredits: getUserCredits(userId).remaining, leaderMode: true, webSearchUsed: false });
+    }
+
+    const cacheKey     = `${childMode}:${parsedText}`;
+    const cachedAnswer = responseCache.get(cacheKey);
+    if (cachedAnswer) {
+      if (conversationId) appendMessages(userId, conversationId, parsedText, cachedAnswer, childMode);
+      sendToken(cachedAnswer);
+      return sendDone({ remainingCredits: getUserCredits(userId).remaining, cached: true, webSearchUsed: false });
+    }
+
+    const profile    = getProfile(userId);
+    const useProfile = profile && hasConsent(userId, "personalization");
+    let systemInstruction = buildEnrichedInstruction(childMode, useProfile ? profile : null);
+    if (req.authUserRole === "admin") systemInstruction = buildLeaderInstruction(req.authUsername);
+
+    const knowledgeContext = findKnowledge(parsedText);
+    if (knowledgeContext) systemInstruction += knowledgeContext;
+
+    let webSearchContext = null;
+    if (provider !== "tensorflow" && needsWebSearch(parsedText)) {
+      const query = extractSearchQuery(parsedText);
+      webSearchContext = await webSearch(query);
+      if (webSearchContext) {
+        systemInstruction +=
+          `\n\n[Información actual de internet sobre "${query}"]:\n${webSearchContext}\n` +
+          "Usa esta información para enriquecer tu respuesta si es relevante.";
+      }
+    }
+
+    const skipCredit = isFriendMode || req.authUserRole === "admin";
+    if (!skipCredit && !spendCredit(userId, 1)) return sendError("Sin creditos diarios");
+    creditSpent = !skipCredit;
+
+    const historyMessages = Array.isArray(history)
+      ? history
+          .slice(-MAX_HISTORY_MESSAGES)
+          .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.text === "string" && m.text.trim())
+          .map((m) => ({ role: m.role, text: m.text.trim().slice(0, MAX_TEXT_LENGTH) }))
+      : [];
+
+    // ES: Comprimir historial largo e inyectar detección de idioma
+    // EN: Compress long history and inject user language hint
+    const processedHistory = compressHistory(historyMessages);
+    const _detectedLang = detectLanguage(parsedText);
+    if (_detectedLang !== "es") {
+      const _LANG_NAMES = { en: "inglés", fr: "francés", it: "italiano" };
+      systemInstruction += ` El usuario escribe en ${_LANG_NAMES[_detectedLang]}; responde íntegramente en ${_LANG_NAMES[_detectedLang]}.`;
+    }
+
+    let answer = "";
+
+    if (provider === "tensorflow") {
+      // ES: TF.js no soporta streaming — ejecutar normal y enviar de golpe
+      // EN: TF.js has no streaming — run normally and send in one chunk
+      const tfResult = await tfChat({ text: parsedText, mode: childMode, history: processedHistory, conversationId, userId });
+      answer = tfResult.answer;
+      webSearchContext = tfResult.webSearchUsed ? "__tf_internal__" : null;
+      sendToken(answer);
+    } else if (provider === "ollama") {
+      const ollamaMessages = [
+        { role: "system", content: systemInstruction },
+        ...processedHistory.map((m) => ({ role: m.role, content: m.text })),
+        { role: "user",   content: parsedText },
+      ];
+      answer = await chatWithOllamaStream({ messages: ollamaMessages, onToken: sendToken });
+    } else {
+      const ai       = getGeminiClient();
+      const gModel   = (process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
+      const contents = [
+        ...processedHistory.map((m) => ({
+          role:  m.role === "assistant" ? "model" : "user",
+          parts: [{ text: m.text }],
+        })),
+        { role: "user", parts: [{ text: parsedText }] },
+      ];
+      answer = await chatWithGeminiStream({
+        ai, model: gModel, contents, config: { systemInstruction }, onToken: sendToken,
+      });
+    }
+
+    const interests = learnFromMessage(parsedText);
+    if (answer) responseCache.set(cacheKey, answer);
+
+    if (profile && hasConsent(userId, "dataCollection")) {
+      recordInteraction(userId, interests);
+      const creativity = detectCreativity(parsedText);
+      if (creativity > 0) recordCreativity(userId, creativity);
+    }
+
+    if (conversationId && answer) appendMessages(userId, conversationId, parsedText, answer, childMode);
+    return sendDone({ remainingCredits: getUserCredits(userId).remaining, webSearchUsed: Boolean(webSearchContext) });
+  } catch (error) {
+    if (creditSpent) refundCredit(userId, 1);
+    console.error("[createChatResponseStream] Error:", error);
+    sendError(error instanceof Error ? error.message : "Error interno");
   }
 }
 
@@ -690,15 +1033,189 @@ async function getKnowledgeInfo(req, res) {
   return res.json(getKnowledgeStats());
 }
 
+// ── analyzeDocument ────────────────────────────────────────────────────────
+// ES: Analiza un archivo subido (PDF o imagen) usando la IA activa.
+//     - PDF: extrae texto con pdf-parse y lo envía al chat como contexto.
+//     - Imagen: envía el buffer base64 al proveedor con capacidad de visión.
+// EN: Analyses an uploaded file (PDF or image) using the active AI.
+//     - PDF: extracts text with pdf-parse and sends it as chat context.
+//     - Image: sends the base64 buffer to the vision-capable provider.
+async function analyzeDocument(req, res) {
+  try {
+    const file = req.file;
+    if (!file) {
+      return res.status(400).json({ error: "No se recibió ningún archivo." });
+    }
+
+    // ES: Validar tipo MIME
+    // EN: Validate MIME type
+    if (!ALLOWED_DOC_TYPES.has(file.mimetype)) {
+      return res.status(400).json({
+        error: "Tipo de archivo no soportado. Usa PDF, JPG, PNG, WEBP o GIF.",
+      });
+    }
+
+    // ES: Validar tamaño
+    // EN: Validate size
+    if (file.size > MAX_DOC_SIZE_BYTES) {
+      return res.status(413).json({ error: "El archivo supera el límite de 10 MB." });
+    }
+
+    const userId        = sanitizeUserId(req.body.userId || req.authUserId);
+    const mode          = parseChildMode(req.body.mode);
+    const rawQuestion   = String(req.body.question || "").trim().slice(0, MAX_TEXT_LENGTH);
+    const question      = rawQuestion || "¿Qué hay en este documento? Resúmelo y explícalo de forma sencilla.";
+    const isAdmin       = req.authUserRole === "admin";
+    const isFriendMode  = mode === "friend";
+    const skipCredit    = isFriendMode || isAdmin;
+
+    // ES: Comprobar créditos antes del análisis costoso
+    // EN: Check credits before the expensive analysis
+    if (!skipCredit && !spendCredit(userId, 1)) {
+      return res.status(402).json({ error: "Sin creditos diarios. Vuelve mañana." });
+    }
+
+    const systemInstruction = isAdmin
+      ? buildLeaderInstruction(req.authUsername || "líder")
+      : buildSystemInstruction(mode);
+
+    let answer;
+
+    if (file.mimetype === "application/pdf") {
+      // ES: Extraer texto del PDF
+      // EN: Extract text from PDF
+      let pdfData;
+      try {
+        pdfData = await pdfParse(file.buffer);
+      } catch {
+        if (!skipCredit) refundCredit(userId, 1);
+        return res.status(422).json({
+          error: "No se pudo leer el PDF. ¿Está protegido con contraseña?",
+        });
+      }
+
+      const extractedText = (pdfData.text || "").trim().slice(0, 6000);
+      if (!extractedText) {
+        if (!skipCredit) refundCredit(userId, 1);
+        return res.status(422).json({
+          error: "El PDF no tiene texto legible (puede ser un PDF de solo imágenes).",
+        });
+      }
+
+      const prompt = `El usuario ha compartido un documento PDF. Contenido del documento:\n\n---\n${extractedText}\n---\n\nPregunta del usuario: ${question}`;
+      const provider = getAIProvider();
+
+      if (provider === "gemini") {
+        const ai = getGeminiClient();
+        const geminiModel = (process.env.GEMINI_MODEL || "gemini-2.0-flash").trim();
+        const result = await ai.models.generateContent({
+          model: geminiModel,
+          contents: [{ parts: [{ text: prompt }] }],
+          config: { systemInstruction },
+        });
+        answer = result.text?.trim();
+      } else if (provider === "ollama") {
+        answer = await chatWithOllama({
+          messages: [
+            { role: "system",  content: systemInstruction },
+            { role: "user",    content: prompt },
+          ],
+        });
+      } else {
+        answer = await tfChat(prompt);
+      }
+    } else {
+      // ES: Imagen → visión de IA
+      // EN: Image → AI vision
+      answer = await analyzeImageWithAI({
+        imageBuffer: file.buffer,
+        mimeType:    file.mimetype,
+        question,
+        systemInstruction,
+      });
+    }
+
+    const remainingCredits = getUserCredits(userId);
+    return res.json({
+      answer: answer || "No pude analizar el documento.",
+      remainingCredits,
+    });
+  } catch (error) {
+    console.error("[analyzeDocument] Error:", error);
+    const status = error.statusCode || 500;
+    return res.status(status).json({
+      error: error.message || "Error interno al analizar el documento.",
+    });
+  }
+}
+
+// ── Quiz / Modo Quiz ────────────────────────────────────────────────────────
+// ES: Genera una pregunta de opción múltiple basada en el contexto reciente
+//     del chat. Devuelve { question, options, answer }.
+// EN: Generates a multiple-choice question based on recent chat context.
+//     Returns { question, options, answer }.
+async function generateQuiz(req, res) {
+  const { context = "", language = "es" } = req.body || {};
+
+  if (!context.trim()) {
+    return res.status(400).json({ error: "context is required" });
+  }
+
+  const langNames = { es: "español", en: "English", fr: "français", it: "italiano" };
+  const langName = langNames[language] || "español";
+
+  const prompt = [
+    { role: "user", content:
+      `Basándote en esta conversación reciente:\n\n${context.slice(0, 1500)}\n\n` +
+      `Genera UNA pregunta de cultura general o de lo que se habló, con exactamente 4 opciones (A, B, C, D). ` +
+      `Responde en ${langName}. ` +
+      `Responde ÚNICAMENTE con este JSON sin texto adicional:\n` +
+      `{"question":"...","options":["A) ...","B) ...","C) ...","D) ..."],"answer":"A) ..."}`
+    },
+  ];
+
+  try {
+    const provider = getAIProvider();
+    let raw = "";
+
+    if (provider === "gemini") {
+      const ai = getGeminiClient();
+      const result = await ai.models.generateContent({
+        model: process.env.GEMINI_MODEL || "gemini-2.0-flash",
+        contents: prompt.map((m) => ({ role: m.role === "user" ? "user" : "model", parts: [{ text: m.content }] })),
+      });
+      raw = result.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    } else {
+      raw = await chatWithOllama({ messages: prompt });
+    }
+
+    // ES: Extraer el JSON de la respuesta
+    // EN: Extract JSON from the response
+    const jsonMatch = raw.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON in AI response");
+    const parsed = JSON.parse(jsonMatch[0]);
+    if (!parsed.question || !Array.isArray(parsed.options) || !parsed.answer) {
+      throw new Error("Invalid quiz format");
+    }
+    return res.json(parsed);
+  } catch (err) {
+    return res.status(500).json({ error: err.message || "No se pudo generar el quiz." });
+  }
+}
+
 export {
   transcribeAudio,
   createChatResponse,
+  createChatResponseStream,
   generateImage,
   generateVideo,
+  analyzeDocument,
   getFactOfTheDay,
   getKnowledgeInfo,
   getChatHistory,
   getChatConversation,
   deleteChatHistory,
   deleteChatConversation,
+  getSpontaneousMessage,
+  generateQuiz,
 };

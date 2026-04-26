@@ -279,8 +279,14 @@ class ResponseCache {
     // ES: Coincidencia exacta / EN: Exact match
     if (this.cache.has(key)) {
       const entry = this.cache.get(key);
-      entry.hits++;
-      return entry.answer;
+      // ES: Expirar entradas con más de 24 h — el conocimiento puede volverse obsoleto
+      // EN: Expire entries older than 24 h — knowledge can become stale
+      if (Date.now() - entry.createdAt > 86_400_000) {
+        this.cache.delete(key);
+      } else {
+        entry.hits++;
+        return entry.answer;
+      }
     }
 
     // ES: Coincidencia difusa (>85% similar) / EN: Fuzzy match (>85% similar)
@@ -288,6 +294,9 @@ class ResponseCache {
     let bestScore = 0;
 
     for (const [cachedKey, entry] of this.cache) {
+      // ES: Omitir entradas expiradas en la búsqueda difusa
+      // EN: Skip expired entries in fuzzy search
+      if (Date.now() - entry.createdAt > 86_400_000) continue;
       const score = this._similarity(key, cachedKey);
       if (score > 0.85 && score > bestScore) {
         bestScore = score;
